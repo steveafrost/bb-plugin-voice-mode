@@ -6,7 +6,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { definePluginApp } from "@get-bb/plugin-sdk/app";
 import type { BrowserToServer, ServerToBrowser } from "./server";
-import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
 
 const PLUGIN_ID = "voice-mode";
@@ -242,6 +241,52 @@ const LABELS: Record<Phase, string> = {
   error: "Voice mode error",
 };
 
+// Codex-style voice glyph: five rounded bars, tallest in the middle. Static
+// when off; the bars bounce while connecting, listening, or speaking.
+const WAVE_BARS = [
+  { x: 2, h: 6 },
+  { x: 6, h: 12 },
+  { x: 10, h: 18 },
+  { x: 14, h: 12 },
+  { x: 18, h: 6 },
+];
+
+const WAVE_CSS = `
+@keyframes voice-mode-bar { 0%, 100% { transform: scaleY(0.45); } 50% { transform: scaleY(1); } }
+.voice-mode-wave rect { transform-box: fill-box; transform-origin: center; }
+.voice-mode-wave[data-live="true"] rect { animation: voice-mode-bar 0.9s ease-in-out infinite; }
+.voice-mode-wave[data-phase="connecting"] rect { animation-duration: 1.4s; opacity: 0.6; }
+.voice-mode-wave[data-phase="speaking"] rect { animation-duration: 0.6s; }
+@media (prefers-reduced-motion: reduce) { .voice-mode-wave rect { animation: none !important; } }
+`;
+
+function VoiceWaveIcon({ phase, className }: { phase: Phase; className?: string }) {
+  const live = phase === "connecting" || phase === "listening" || phase === "speaking";
+  return (
+    <svg
+      viewBox="0 0 22 22"
+      fill="currentColor"
+      aria-hidden
+      data-phase={phase}
+      data-live={live}
+      className={cn("voice-mode-wave size-4", className)}
+    >
+      <style>{WAVE_CSS}</style>
+      {WAVE_BARS.map((bar, i) => (
+        <rect
+          key={bar.x}
+          x={bar.x}
+          y={(22 - bar.h) / 2}
+          width={2.2}
+          height={bar.h}
+          rx={1.1}
+          style={{ animationDelay: `${[0.3, 0.15, 0, 0.15, 0.3][i]}s` }}
+        />
+      ))}
+    </svg>
+  );
+}
+
 function VoiceButton({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
   const { phase, caption, agentStatus, start, stop } = useVoiceSession(threadId);
   const live = phase === "connecting" || phase === "listening" || phase === "speaking";
@@ -262,14 +307,9 @@ function VoiceButton({ threadId, isCompactViewport }: { threadId: string; isComp
           phase === "error" && "text-destructive",
         )}
       >
-        <Icon
-          name={phase === "connecting" ? "Loader2" : phase === "speaking" ? "AudioLines" : "Mic"}
-          className={cn(
-            "size-4",
-            phase === "connecting" && "animate-spin",
-            phase === "listening" && "animate-pulse text-red-500",
-            phase === "speaking" && "text-sky-500",
-          )}
+        <VoiceWaveIcon
+          phase={phase}
+          className={cn(phase === "listening" && "text-red-500", phase === "speaking" && "text-sky-500")}
         />
         {live && !isCompactViewport ? <span className="text-xs">{LABELS[phase]}</span> : null}
       </button>
