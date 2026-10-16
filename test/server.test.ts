@@ -158,4 +158,24 @@ describe("session", () => {
     expect(toBrowser().filter((m) => m.type === "INTERRUPTION")).toHaveLength(1);
     expect(upstream.ofType("conversation.item.truncate")[0]).toMatchObject({ item_id: "item_1", content_index: 0 });
   });
+
+  it("ends a session nobody has talked in for five minutes, but not while the agent works", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const { upstream, toBrowser } = await liveSession();
+      upstream.emit({ type: "response.created" });
+      upstream.emit({ type: "response.function_call_arguments.done", call_id: "c", name: "send_to_agent", arguments: '{"text":"go"}' });
+      upstream.emit({ type: "response.done" });
+      await vi.advanceTimersByTimeAsync(6 * 60_000);
+      expect(toBrowser().some((m) => m.type === "ENDED")).toBe(false);
+
+      const next = await liveSession();
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      expect(next.toBrowser().some((m) => m.type === "ENDED")).toBe(false);
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(next.toBrowser().some((m) => m.type === "ENDED")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

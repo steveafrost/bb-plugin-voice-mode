@@ -13,5 +13,5 @@ Add an OpenAI API key in the plugin settings, or install a plugin that provides 
 
 ## Notes
 
-- Mic audio, the thread title and the agent's latest message go to the realtime provider you configure, only while a session is on.
+- Mic audio, the thread title and the agent's latest message go to the realtime provider you configure, only while a session is on. Sessions end themselves after 5 idle minutes.
 - bb has no plugin slot for the send button or mic, so the plugin relies on bb's composer markup; a bb update can hide the waveform until the plugin is updated. bb's own send and dictation are never affected.

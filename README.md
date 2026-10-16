@@ -60,6 +60,8 @@ session.
   waveform until the plugin catches up. bb's own send and dictation keep
   working either way.
 - One session at a time; switching threads ends it.
+- A session ends itself after 5 minutes with no speech, no reply playing and
+  no agent turn in flight, so a forgotten session doesn't keep streaming.
 
 ## Develop
 

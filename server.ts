@@ -18,6 +18,8 @@ const PLUGIN_ID = "voice-mode";
 const MAX_OUTPUT_CHARS = 2500;
 const MAX_INSTRUCTION_CHARS = 8000;
 const SAMPLE_RATE = 24000;
+const IDLE_MS = 5 * 60_000;
+const IDLE_CHECK_MS = 15_000;
 const CONNECTION_RPC = "realtimeConnection";
 
 export const MODELS = ["gpt-realtime-2", "gpt-realtime", "gpt-realtime-mini"] as const;
@@ -177,6 +179,15 @@ export default function plugin(bb: BbPluginApi) {
     // Playback position of the reply being spoken, so a barge-in can tell the
     // model how much the user actually heard.
     let speaking: { itemId: string; startedAt: number; sentMs: number } | null = null;
+    // A forgotten session keeps streaming mic audio to a paid API, so end it
+    // after IDLE_MS with nobody talking, no reply playing and no agent turn
+    // we're waiting on.
+    let lastActivity = Date.now();
+    const idleTimer = setInterval(() => {
+      if (!ready || responseActive || awaitingResult || Date.now() - lastActivity < IDLE_MS) return;
+      bb.log.info(`voice session ${threadId}: ended after ${IDLE_MS / 60000} idle minutes`);
+      shutdown();
+    }, IDLE_CHECK_MS);
 
     const toBrowser = (message: ServerToBrowser) => {
       if (!closed) browser?.send(JSON.stringify(message));
@@ -188,6 +199,7 @@ export default function plugin(bb: BbPluginApi) {
       if (closed) return;
       toBrowser({ type: "ENDED" });
       closed = true;
+      clearInterval(idleTimer);
       unsubscribe?.();
       upstream?.close(1000);
       browser?.close(1000);
@@ -269,6 +281,7 @@ export default function plugin(bb: BbPluginApi) {
     }
 
     function onSpeechStarted() {
+      lastActivity = Date.now();
       toBrowser({ type: "INTERRUPTION" });
       if (!speaking) return;
       // The server cancels the response itself (interrupt_response); trim the
@@ -312,6 +325,7 @@ export default function plugin(bb: BbPluginApi) {
           responseActive = true;
           break;
         case "response.done":
+          lastActivity = Date.now();
           void onResponseDone();
           break;
         case "response.output_audio.delta": {
