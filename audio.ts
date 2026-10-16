@@ -90,10 +90,11 @@ export class Player {
 
 // Local barge-in: the proxy can only interrupt audio it is still generating,
 // and it sends audio faster than real time. If the user talks over audio we
-// already buffered, cut playback here. ~200 ms above this RMS counts as speech;
+// already buffered, cut playback here. 5 chunks (~213 ms at 24 kHz) above this
+// RMS count as speech;
 // echo cancellation keeps the model's own voice well below it.
 export const BARGE_IN_RMS = 0.04;
-export const BARGE_IN_CHUNKS = 3;
+export const BARGE_IN_CHUNKS = 5;
 
 /** Captures the mic at the session's input rate as PCM16 chunks. */
 // While muted the mic keeps running but sends digital silence, so the session
@@ -105,7 +106,7 @@ export async function startMic(sampleRate: number, isMuted: () => boolean, onChu
   const ctx = new AudioContext({ sampleRate });
   const source = ctx.createMediaStreamSource(stream);
   // ScriptProcessor avoids loading a worklet module under bb's CSP; 1024
-  // frames at 16 kHz is a 64 ms chunk.
+  // frames at 24 kHz is a ~43 ms chunk.
   const processor = ctx.createScriptProcessor(1024, 1, 1);
   processor.onaudioprocess = (event) => {
     const input = event.inputBuffer.getChannelData(0);

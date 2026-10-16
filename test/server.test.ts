@@ -1,4 +1,4 @@
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import plugin from "../server";
 
@@ -45,16 +45,23 @@ afterEach(() => vi.unstubAllGlobals());
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-async function startSession(options: { settings?: Record<string, string>; connectionPlugin?: boolean }) {
+async function startSession(options: {
+  settings?: Record<string, string>;
+  connectionPlugin?: boolean;
+  connectionUrl?: string;
+  interactions?: unknown[];
+  thread?: Record<string, unknown>;
+}) {
   const { bb, harness } = createFakePluginHost({
     pluginId: "voice-mode",
     settings: options.settings ?? {},
     sdk: {
       threads: {
-        get: async () => ({ status: "idle", title: "Fix the build" }),
+        get: async () => ({ status: "idle", title: "Fix the build", ...options.thread }),
         output: async () => ({ output: "Build is green." }),
         send: async () => ({}),
         stop: async () => ({}),
+        interactions: { list: async () => options.interactions ?? [] },
       },
       subscribe: () => () => {},
       plugins: {
@@ -62,7 +69,7 @@ async function startSession(options: { settings?: Record<string, string>; connec
           options.connectionPlugin ? [{ pluginId: "shopify-ai", method: "realtimeConnection" }] : [],
         callRpc: async () => ({
           protocol: "openai-realtime",
-          url: "wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini",
+          url: options.connectionUrl ?? "wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini",
           headers: { authorization: "Bearer proxy-token" },
           model: "gpt-realtime-mini",
         }),
@@ -73,7 +80,7 @@ async function startSession(options: { settings?: Record<string, string>; connec
   const browser = await harness.experimental_openWebSocket(`/session?threadId=${THREAD}`);
   await flush();
   const toBrowser = () => browser.sent.map((m) => JSON.parse(String(m)) as Record<string, unknown>);
-  return { harness, browser, toBrowser };
+  return { harness, browser, toBrowser, bb };
 }
 
 describe("connection", () => {
@@ -94,6 +101,17 @@ describe("connection", () => {
   it("ignores connection plugins when set to the API key", async () => {
     await startSession({ settings: { openaiApiKey: "sk-test", connection: "openai-api-key" }, connectionPlugin: true });
     expect(FakeUpstream.last!.url).toContain("api.openai.com");
+  });
+
+  it("only sends the API key to OpenAI, whatever an old realtimeUrl setting says", async () => {
+    await startSession({ settings: { openaiApiKey: "sk-test", realtimeUrl: "wss://attacker.example/v1/realtime" } });
+    expect(FakeUpstream.last!.url).toBe("wss://api.openai.com/v1/realtime?model=gpt-realtime-2");
+  });
+
+  it("refuses a connection plugin's non-wss url", async () => {
+    const { toBrowser } = await startSession({ connectionPlugin: true, connectionUrl: "ws://proxy.example.com/v1/realtime" });
+    expect(FakeUpstream.last).toBeNull();
+    expect(toBrowser()[0]).toMatchObject({ type: "ERROR" });
   });
 
   it("explains the setup when there is neither a key nor a connection plugin", async () => {
@@ -118,18 +136,26 @@ describe("session", () => {
     expect(update!.session.audio.output.voice).toBe("cedar");
     expect(update!.session.audio.input.turn_detection).toMatchObject({ interrupt_response: true });
     expect(update!.session.tools.map((t: { name: string }) => t.name)).toEqual(["send_to_agent", "stop_agent", "get_agent_status"]);
-    expect(update!.session.instructions).toContain("Fix the build");
+    // Thread content is untrusted data: never in the system instructions.
+    expect(update!.session.instructions).not.toContain("Fix the build");
+    expect(update!.session.instructions).not.toContain("Build is green");
+    expect(upstream.ofType("conversation.item.create")[0]).toMatchObject({
+      item: { role: "user", content: [{ text: expect.stringMatching(/^\[bb update\].*Fix the build.*Build is green/) }] },
+    });
+    expect(upstream.ofType("response.create")).toHaveLength(0);
     expect(toBrowser()).toContainEqual({ type: "READY", inputHz: 24000, outputHz: 24000 });
   });
 
-  it("relays mic audio upstream", async () => {
+  it("relays mic audio upstream, dropping oversized frames", async () => {
     const { browser, upstream } = await liveSession();
     await browser.receive(JSON.stringify({ type: "AUDIO", base64Data: "AAAA" }));
+    await browser.receive(JSON.stringify({ type: "AUDIO", base64Data: "A".repeat(300_000) }));
     expect(upstream.ofType("input_audio_buffer.append")).toEqual([{ type: "input_audio_buffer.append", audio: "AAAA" }]);
   });
 
   it("runs send_to_agent against the thread and asks for a reply after the response ends", async () => {
     const { harness, upstream } = await liveSession();
+    upstream.emit({ type: "input_audio_buffer.speech_started" });
     upstream.emit({ type: "response.created" });
     upstream.emit({
       type: "response.function_call_arguments.done",
@@ -142,12 +168,35 @@ describe("session", () => {
     await flush();
     expect(harness.sdk.callsTo("threads.send")[0]?.[0]).toMatchObject({
       threadId: THREAD,
-      input: [{ type: "text", text: "Run the tests" }],
+      input: [{ type: "text", text: "[Voice Mode] Run the tests" }],
     });
-    expect(upstream.ofType("conversation.item.create")[0]).toMatchObject({
+    expect(upstream.ofType("conversation.item.create")[1]).toMatchObject({
       item: { type: "function_call_output", call_id: "call_1" },
     });
-    expect(upstream.ofType("response.create")).toHaveLength(1);
+    // The follow-up only reports back; it can't chain more tool calls.
+    expect(upstream.ofType("response.create")).toEqual([{ type: "response.create", response: { tool_choice: "none" } }]);
+  });
+
+  it("allows one send_to_agent per thing the user says", async () => {
+    const { harness, upstream } = await liveSession();
+    const call = (id: string) =>
+      upstream.emit({ type: "response.function_call_arguments.done", call_id: id, name: "send_to_agent", arguments: '{"text":"go"}' });
+    call("unprompted");
+    upstream.emit({ type: "input_audio_buffer.speech_started" });
+    call("first");
+    call("second");
+    await flush();
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(1);
+    const outputs = upstream.ofType("conversation.item.create").slice(1) as { item: { call_id: string; output: string } }[];
+    expect(outputs.find((o) => o.item.call_id === "unprompted")!.item.output).toMatch(/^Not sent/);
+    expect(outputs.find((o) => o.item.call_id === "second")!.item.output).toMatch(/^Not sent/);
+  });
+
+  it("keeps one live session per bb server", async () => {
+    const { harness, toBrowser } = await liveSession();
+    await harness.experimental_openWebSocket(`/session?threadId=thr_other`);
+    await flush();
+    expect(toBrowser().some((m) => m.type === "ENDED")).toBe(true);
   });
 
   it("interrupts playback and trims the reply when the user talks over it", async () => {
@@ -163,11 +212,17 @@ describe("session", () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
     try {
       const { upstream, toBrowser } = await liveSession();
+      upstream.emit({ type: "input_audio_buffer.speech_started" });
       upstream.emit({ type: "response.created" });
       upstream.emit({ type: "response.function_call_arguments.done", call_id: "c", name: "send_to_agent", arguments: '{"text":"go"}' });
       upstream.emit({ type: "response.done" });
+      await vi.advanceTimersByTimeAsync(0);
+      upstream.emit({ type: "response.done" }); // the spoken follow-up
       await vi.advanceTimersByTimeAsync(6 * 60_000);
       expect(toBrowser().some((m) => m.type === "ENDED")).toBe(false);
+      // ...but not forever: a hung agent turn ends it after 20 quiet minutes.
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      expect(toBrowser().some((m) => m.type === "ENDED")).toBe(true);
 
       const next = await liveSession();
       await vi.advanceTimersByTimeAsync(4 * 60_000);
@@ -177,5 +232,123 @@ describe("session", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("agent turns", () => {
+  async function liveSession(options: Parameters<typeof startSession>[0] = {}) {
+    const session = await startSession({ settings: { openaiApiKey: "sk-test" }, ...options });
+    const upstream = FakeUpstream.last!;
+    upstream.open();
+    upstream.emit({ type: "session.updated" });
+    return { ...session, upstream };
+  }
+  const thread = (status: "idle" | "active" | "error") => makeThreadResponse({ id: THREAD, status });
+  const userTexts = (upstream: FakeUpstream) =>
+    (upstream.ofType("conversation.item.create") as { item: { role?: string; content?: { text: string }[] } }[])
+      .filter((m) => m.item.role === "user")
+      .map((m) => m.item.content![0]!.text);
+
+  it("reports a finished turn as a [bb update] the model can only talk about", async () => {
+    const { harness, upstream } = await liveSession();
+    await harness.emitThreadEvent("thread.active", { thread: thread("active") });
+    await harness.emitThreadEvent("thread.idle", { thread: thread("idle"), lastAssistantText: "All 40 tests pass." });
+    expect(userTexts(upstream).at(-1)).toMatch(/^\[bb update\] The agent finished.*All 40 tests pass/);
+    expect(upstream.ofType("response.create")).toEqual([{ type: "response.create", response: { tool_choice: "none" } }]);
+  });
+
+  it("reports a turn that starts and ends between status reads", async () => {
+    // Transition events, not polling: nothing to miss even if both land at once.
+    const { harness, upstream } = await liveSession();
+    await Promise.all([
+      harness.emitThreadEvent("thread.active", { thread: thread("active") }),
+      harness.emitThreadEvent("thread.idle", { thread: thread("idle"), lastAssistantText: "Done." }),
+    ]);
+    expect(userTexts(upstream).some((t) => t.includes("Done."))).toBe(true);
+  });
+
+  it("ignores events for other threads", async () => {
+    const { harness, upstream } = await liveSession();
+    await harness.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: "thr_other", status: "active" }) });
+    await harness.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thr_other", status: "idle" }), lastAssistantText: "x" });
+    expect(upstream.ofType("response.create")).toHaveLength(0);
+  });
+
+  it("tells the user when the agent is waiting on them, and stops holding the session open", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const { harness, upstream, toBrowser } = await liveSession();
+      await harness.emitThreadEvent("thread.active", { thread: thread("active") });
+      await harness.emitThreadEvent("interaction.pending", { thread: thread("active"), interaction: {} as never });
+      expect(userTexts(upstream).at(-1)).toMatch(/answer it in bb/);
+      expect(toBrowser()).toContainEqual({ type: "AGENT_STATUS", status: "waiting for you" });
+      upstream.emit({ type: "response.done" });
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 15_000);
+      expect(toBrowser().some((m) => m.type === "ENDED")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("includes a pending question in get_agent_status", async () => {
+    const { upstream } = await liveSession({ interactions: [{ id: "int_1" }], thread: { status: "active" } });
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "s", name: "get_agent_status", arguments: "" });
+    await flush();
+    const output = (upstream.ofType("conversation.item.create") as { item: { call_id?: string; output?: string } }[]).find((m) => m.item.call_id === "s");
+    expect(output!.item.output).toMatch(/waiting for the user/);
+  });
+
+  it("answers a tool that finishes while another response is playing", async () => {
+    const { upstream } = await liveSession();
+    upstream.emit({ type: "response.created" });
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "a", name: "get_agent_status", arguments: "" });
+    upstream.emit({ type: "response.done" });
+    await flush();
+    expect(upstream.ofType("response.create")).toHaveLength(1);
+    // The user asks again while the follow-up plays; its tool lands mid-response.
+    upstream.emit({ type: "response.created" });
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "b", name: "get_agent_status", arguments: "" });
+    await flush();
+    expect(upstream.ofType("response.create")).toHaveLength(1);
+    upstream.emit({ type: "response.done" });
+    expect(upstream.ofType("response.create")).toHaveLength(2);
+  });
+
+  it("trims a reply the user talks over after generation finished, but not one already played", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const { upstream } = await liveSession();
+      upstream.emit({ type: "response.created" });
+      // 64000 base64 chars = 48000 bytes = 1000 ms of 24 kHz PCM16.
+      upstream.emit({ type: "response.output_audio.delta", item_id: "item_1", delta: "A".repeat(64000) });
+      upstream.emit({ type: "response.done" });
+      await vi.advanceTimersByTimeAsync(400);
+      upstream.emit({ type: "input_audio_buffer.speech_started" });
+      expect(upstream.ofType("conversation.item.truncate")).toEqual([
+        { type: "conversation.item.truncate", item_id: "item_1", content_index: 0, audio_end_ms: 400 },
+      ]);
+
+      upstream.emit({ type: "response.created" });
+      upstream.emit({ type: "response.output_audio.delta", item_id: "item_2", delta: "A".repeat(64000) });
+      upstream.emit({ type: "response.done" });
+      await vi.advanceTimersByTimeAsync(2000);
+      upstream.emit({ type: "input_audio_buffer.speech_started" });
+      expect(upstream.ofType("conversation.item.truncate")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks a connection plugin for a fresh credential once when the handshake fails", async () => {
+    const { harness } = await startSession({ connectionPlugin: true });
+    const first = FakeUpstream.last!;
+    first.onerror?.();
+    await flush();
+    expect(FakeUpstream.last).not.toBe(first);
+    expect(harness.sdk.callsTo("plugins.callRpc").map((c) => (c[0] as { input: unknown }).input)).toEqual([{}, { refresh: true }]);
+    const second = FakeUpstream.last!;
+    second.onerror?.();
+    await flush();
+    expect(FakeUpstream.last).toBe(second);
   });
 });
