@@ -24,6 +24,8 @@ const ERROR_DISMISS_MS = 6000;
 const cn = (...classes: (string | false | null | undefined)[]) => classes.filter(Boolean).join(" ");
 
 const SEND_SELECTOR = "[data-promptbox-send-menu]";
+/** How long to wait for bb's send group before falling back to the action slot. */
+const FALLBACK_AFTER_MS = 1500;
 /** Set on the composer form while the waveform button replaces bb's send button. */
 const VOICE_SEND_ATTR = "data-voice-mode-send";
 /** Set on the composer form while the voice pill replaces bb's mic. */
@@ -158,11 +160,12 @@ const expandFrom = new WeakMap<VoiceSession, { width: number; background: string
 const restBox = new WeakMap<VoiceSession, { both: number; mic: number; background: string }>();
 const REST_FALLBACK = { both: 96, mic: 32, background: "transparent" };
 
-function rememberExpandFrom(session: VoiceSession, button: HTMLElement) {
+function rememberExpandFrom(session: VoiceSession, button: HTMLElement, docked: boolean) {
   const right = button.getBoundingClientRect().right;
-  // The mic sits left of the waveform and goes away with it, so start from its
-  // left edge too; then nothing else in the composer row moves.
-  const mic = button.closest("form")?.querySelector<HTMLElement>('button[aria-label="Start voice input"]');
+  // Docked, the mic sits left of the waveform and goes away with it, so start
+  // from its left edge too; then nothing else in the composer row moves.
+  // Undocked (fallback), the mic stays put, so the pill grows from the button.
+  const mic = docked ? button.closest("form")?.querySelector<HTMLElement>('button[aria-label="Start voice input"]') : null;
   const left = mic?.getBoundingClientRect().width ? mic.getBoundingClientRect().left : button.getBoundingClientRect().left;
   const background = getComputedStyle(button).backgroundColor;
   expandFrom.set(session, { width: right - left, background });
@@ -389,7 +392,7 @@ function useSendButtonLook(ref: React.RefObject<HTMLElement | null>) {
   return look;
 }
 
-function StartVoiceButton({ session }: { session: VoiceSession }) {
+function StartVoiceButton({ session, docked }: { session: VoiceSession; docked: boolean }) {
   const ref = useRef<HTMLButtonElement>(null);
   const look = useSendButtonLook(ref);
   return (
@@ -399,7 +402,7 @@ function StartVoiceButton({ session }: { session: VoiceSession }) {
         type="button"
         aria-label="Start new voice chat"
         onClick={(event) => {
-          rememberExpandFrom(session, event.currentTarget);
+          rememberExpandFrom(session, event.currentTarget, docked);
           void session.start();
         }}
         style={look}
@@ -420,6 +423,19 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
   const { phase } = useVoiceState(session);
   const anchor = useRef<HTMLSpanElement>(null);
   const [host, setHost] = useState<HTMLElement | null>(null);
+  // bb's send group usually renders within a frame or two of this action. If
+  // it hasn't after a beat, bb's markup has changed: fall back to rendering in
+  // the composer action slot the SDK gave us, beside bb's own controls, and
+  // leave send and the mic alone.
+  const [undocked, setUndocked] = useState(false);
+  useEffect(() => {
+    if (host) {
+      setUndocked(false);
+      return;
+    }
+    const timer = setTimeout(() => setUndocked(true), FALLBACK_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [host]);
 
   // When a live session ends (end button, idle end, the socket closing), keep
   // the pill up while it slides closed. Derived during render so the mic and
@@ -476,13 +492,13 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
     root.toggleAttribute(LIVE_ATTR, showing);
   }, [host, hideSend, showing]);
 
-  const content = showStart ? <StartVoiceButton session={session} /> : (
-    <VoicePill session={session} closing={closing} toStart={canStart} onClosed={() => setClosing(false)} />
+  const content = showStart ? <StartVoiceButton session={session} docked={!!host} /> : (
+    <VoicePill session={session} closing={closing} toStart={canStart && !!host} onClosed={() => setClosing(false)} />
   );
   return (
     <>
       <span ref={anchor} hidden />
-      {host ? createPortal(content, host) : isLive(phase) || phase === "error" || closing ? content : null}
+      {host ? createPortal(content, host) : undocked || isLive(phase) || phase === "error" || closing ? content : null}
     </>
   );
 }

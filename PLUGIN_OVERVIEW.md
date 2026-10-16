@@ -15,4 +15,4 @@ Install a plugin that provides realtime connections (for example a company AI pr
 
 - While a session is on, the realtime provider gets your mic audio, the thread title, and the agent's messages (the latest one at start, then each reply, first 2,500 characters). Sessions end after 5 idle minutes (20 while the agent works) and after 30 minutes regardless.
 - Agent replies are treated as data: the voice model can't act on them, and it forwards at most one instruction per thing you say, marked `[Voice Mode]`.
-- bb has no plugin slot for the send button or mic, so the plugin relies on bb's composer markup; a bb update can hide the waveform until the plugin is updated. bb's own send and dictation are never affected.
+- bb has no plugin slot for the send button or mic, so the plugin relies on bb's composer markup; if a bb update changes that markup, the waveform falls back to sitting beside bb's buttons instead of replacing send. bb's own send and dictation are never affected.

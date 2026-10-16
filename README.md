@@ -77,9 +77,10 @@ messages start with `[Voice Mode]` so you and the agent can tell them apart.
 
 - bb has no plugin slot for its send button or mic. Voice Mode finds them by
   bb's DOM markers (`[data-promptbox-send-menu]`,
-  `button[aria-label="Start voice input"]`), so a bb update can hide the
-  waveform until the plugin catches up. bb's own send and dictation keep
-  working either way.
+  `button[aria-label="Start voice input"]`, `[data-promptbox-submit-group]`).
+  If a bb update changes them, the waveform and pill fall back to the
+  composer's plugin action slot beside bb's own buttons: less Codex-like, but
+  still there. bb's own send and dictation keep working either way.
 - One session at a time per bb server; switching threads ends it.
 - A session ends itself after 5 minutes with no speech and no reply playing
   (20 minutes while an agent turn is running), and after 30 minutes in any
