@@ -183,6 +183,11 @@ function useVoiceSession(threadId: string) {
                 setPhase("listening");
               }
             });
+            // The user may have stopped while the permission prompt was open.
+            if (ended) {
+              await stopMic();
+              break;
+            }
             setPhase("listening");
           } catch (error) {
             setCaption(`Microphone unavailable: ${error instanceof Error ? error.message : String(error)}`);
