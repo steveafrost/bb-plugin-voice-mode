@@ -92,7 +92,9 @@ const BARGE_IN_RMS = 0.04;
 const BARGE_IN_CHUNKS = 3;
 
 /** Captures the mic at the session's input rate as PCM16 chunks. */
-async function startMic(sampleRate: number, onChunk: (base64: string, rms: number) => void) {
+// While muted the mic keeps running but sends digital silence, so the session
+// stays open and the server VAD still sees the end of any cut-off utterance.
+async function startMic(sampleRate: number, isMuted: () => boolean, onChunk: (base64: string, rms: number) => void) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
@@ -104,6 +106,10 @@ async function startMic(sampleRate: number, onChunk: (base64: string, rms: numbe
   processor.onaudioprocess = (event) => {
     const input = event.inputBuffer.getChannelData(0);
     const pcm = new Int16Array(input.length);
+    if (isMuted()) {
+      onChunk(base64FromInt16(pcm), 0);
+      return;
+    }
     let energy = 0;
     for (let i = 0; i < input.length; i++) {
       const s = Math.max(-1, Math.min(1, input[i]));
@@ -135,7 +141,14 @@ function useVoiceSession(threadId: string) {
   const [phase, setPhase] = useState<Phase>("off");
   const [caption, setCaption] = useState<string>("");
   const [agentStatus, setAgentStatus] = useState<string | null>(null);
+  const [muted, setMutedState] = useState(false);
+  const mutedRef = useRef(false);
   const teardown = useRef<(() => Promise<void>) | null>(null);
+
+  const setMuted = useCallback((next: boolean) => {
+    mutedRef.current = next;
+    setMutedState(next);
+  }, []);
 
   const stop = useCallback(async () => {
     const run = teardown.current;
@@ -162,6 +175,7 @@ function useVoiceSession(threadId: string) {
       ws.close();
       await stopMic?.();
       await player?.close();
+      setMuted(false);
       setPhase(nextPhase);
     };
     teardown.current = () => cleanup("off");
@@ -174,7 +188,7 @@ function useVoiceSession(threadId: string) {
           player.onIdle = () => setPhase((p) => (p === "speaking" ? "listening" : p));
           try {
             let loudChunks = 0;
-            stopMic = await startMic(message.inputHz, (base64Data, rms) => {
+            stopMic = await startMic(message.inputHz, () => mutedRef.current, (base64Data, rms) => {
               send({ type: "AUDIO", base64Data });
               loudChunks = rms > BARGE_IN_RMS ? loudChunks + 1 : 0;
               if (loudChunks >= BARGE_IN_CHUNKS && player?.playing) {
@@ -226,11 +240,11 @@ function useVoiceSession(threadId: string) {
       void cleanup("error");
     };
     ws.onclose = () => void cleanup("off");
-  }, [threadId]);
+  }, [threadId, setMuted]);
 
   useEffect(() => () => void stop(), [stop]);
 
-  return { phase, caption, agentStatus, start, stop };
+  return { phase, caption, agentStatus, muted, setMuted, start, stop };
 }
 
 const LABELS: Record<Phase, string> = {
@@ -287,10 +301,45 @@ function VoiceWaveIcon({ phase, className }: { phase: Phase; className?: string 
   );
 }
 
+// Lucide mic / mic-off glyphs, inlined because bb's icon set lacks MicOff.
+function MicIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="size-4"
+    >
+      {muted ? (
+        <>
+          <line x1="2" x2="22" y1="2" y2="22" />
+          <path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" />
+          <path d="M5 10v2a7 7 0 0 0 12 5" />
+          <path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" />
+          <path d="M9 9v3a3 3 0 0 0 5.12 2.12" />
+          <line x1="12" x2="12" y1="19" y2="22" />
+        </>
+      ) : (
+        <>
+          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+          <line x1="12" x2="12" y1="19" y2="22" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 function VoiceButton({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
-  const { phase, caption, agentStatus, start, stop } = useVoiceSession(threadId);
+  const { phase, caption, agentStatus, muted, setMuted, start, stop } = useVoiceSession(threadId);
   const live = phase === "connecting" || phase === "listening" || phase === "speaking";
-  const label = live ? `Stop voice mode (${LABELS[phase].toLowerCase()})` : LABELS[phase];
+  const micActive = phase === "listening" || phase === "speaking";
+  const status = muted && phase === "listening" ? "Muted" : LABELS[phase];
+  const label = live ? `Stop voice mode (${status.toLowerCase()})` : LABELS[phase];
   const tooltip = [label, agentStatus && live ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
 
   return (
@@ -309,10 +358,25 @@ function VoiceButton({ threadId, isCompactViewport }: { threadId: string; isComp
       >
         <VoiceWaveIcon
           phase={phase}
-          className={cn(phase === "listening" && "text-red-500", phase === "speaking" && "text-sky-500")}
+          className={cn(phase === "listening" && !muted && "text-red-500", phase === "speaking" && "text-sky-500")}
         />
-        {live && !isCompactViewport ? <span className="text-xs">{LABELS[phase]}</span> : null}
+        {live && !isCompactViewport ? <span className="text-xs">{status}</span> : null}
       </button>
+      {micActive ? (
+        <button
+          type="button"
+          aria-label={muted ? "Unmute microphone" : "Mute microphone"}
+          aria-pressed={muted}
+          title={muted ? "Unmute microphone" : "Mute microphone (session stays open)"}
+          onClick={() => setMuted(!muted)}
+          className={cn(
+            "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+            muted && "bg-accent text-red-500",
+          )}
+        >
+          <MicIcon muted={muted} />
+        </button>
+      ) : null}
       {live && caption && !isCompactViewport ? (
         <span className="max-w-64 truncate text-xs text-muted-foreground" aria-live="polite">
           {caption}
