@@ -85,8 +85,15 @@ class Player {
   }
 }
 
+// Local barge-in: the proxy can only interrupt audio it is still generating,
+// and it sends audio faster than real time. If the user talks over audio we
+// already buffered, cut playback here. ~200 ms above this RMS counts as speech;
+// echo cancellation keeps the model's own voice well below it.
+const BARGE_IN_RMS = 0.04;
+const BARGE_IN_CHUNKS = 3;
+
 /** Captures the mic at the session's input rate as PCM16 chunks. */
-async function startMic(sampleRate: number, onChunk: (base64: string) => void) {
+async function startMic(sampleRate: number, onChunk: (base64: string, rms: number) => void) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
@@ -98,11 +105,13 @@ async function startMic(sampleRate: number, onChunk: (base64: string) => void) {
   processor.onaudioprocess = (event) => {
     const input = event.inputBuffer.getChannelData(0);
     const pcm = new Int16Array(input.length);
+    let energy = 0;
     for (let i = 0; i < input.length; i++) {
       const s = Math.max(-1, Math.min(1, input[i]));
+      energy += s * s;
       pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
     }
-    onChunk(base64FromInt16(pcm));
+    onChunk(base64FromInt16(pcm), Math.sqrt(energy / input.length));
   };
   const sink = ctx.createGain();
   sink.gain.value = 0;
@@ -165,7 +174,15 @@ function useVoiceSession(threadId: string) {
           player = new Player(message.outputHz);
           player.onIdle = () => setPhase((p) => (p === "speaking" ? "listening" : p));
           try {
-            stopMic = await startMic(message.inputHz, (base64Data) => send({ type: "AUDIO", base64Data }));
+            let loudChunks = 0;
+            stopMic = await startMic(message.inputHz, (base64Data, rms) => {
+              send({ type: "AUDIO", base64Data });
+              loudChunks = rms > BARGE_IN_RMS ? loudChunks + 1 : 0;
+              if (loudChunks >= BARGE_IN_CHUNKS && player?.playing) {
+                player.interrupt();
+                setPhase("listening");
+              }
+            });
             setPhase("listening");
           } catch (error) {
             setCaption(`Microphone unavailable: ${error instanceof Error ? error.message : String(error)}`);
