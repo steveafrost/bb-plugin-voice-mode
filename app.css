@@ -1,0 +1,68 @@
+/* Voice Mode: hold-to-start morph on bb's mic, and hiding the mic while the
+   voice pill stands in for it. */
+
+.voice-mode-host {
+  display: contents;
+}
+
+[data-voice-mode-live] span:has(> button[aria-label="Start voice input"]) {
+  display: none;
+}
+
+button[aria-label="Start voice input"] [data-icon="Mic"] {
+  transition: opacity 120ms ease, transform 160ms ease;
+}
+
+.voice-mode-hold-wave {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.voice-mode-hold-wave svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.voice-mode-hold-wave rect {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: scaleY(0.3);
+}
+
+[data-voice-hold] [data-icon="Mic"] {
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+[data-voice-hold] .voice-mode-hold-wave {
+  opacity: 1;
+}
+
+/* Bars grow to full height over the hold, so the gesture reads as progress. */
+[data-voice-hold="pending"] .voice-mode-hold-wave rect {
+  animation: voice-mode-grow 450ms cubic-bezier(0.3, 0, 0.2, 1) forwards;
+  animation-delay: calc(var(--i, 0) * 25ms);
+}
+
+[data-voice-hold="armed"] .voice-mode-hold-wave rect {
+  transform: scaleY(1);
+}
+
+@keyframes voice-mode-grow {
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-voice-hold] .voice-mode-hold-wave rect {
+    animation: none;
+    transform: scaleY(1);
+  }
+}

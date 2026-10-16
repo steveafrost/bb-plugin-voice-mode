@@ -1,308 +1,96 @@
-// Voice Mode frontend: a thread-header mic button that runs a full-duplex
-// voice session with the thread's agent. Mic PCM streams to the plugin backend
-// over a WebSocket; model audio streams back and plays gaplessly. When the
-// proxy reports INTERRUPTION (the user started talking), queued playback stops
-// at once.
-import { useCallback, useEffect, useRef, useState } from "react";
-import { definePluginApp } from "@get-bb/plugin-sdk/app";
-import type { BrowserToServer, ServerToBrowser } from "./server";
+// Voice Mode frontend. Voice mode lives on bb's own composer mic:
+//
+// - Click the mic: bb's dictation, unchanged.
+// - Press and hold the mic: the glyph morphs into a waveform and, once held,
+//   starts a full-duplex voice session with the thread's agent.
+// - While live, the mic is replaced by a Codex-style pill: a level-reactive
+//   waveform, status, a mute toggle, and an end button.
+//
+// bb exposes no SDK hook on its mic, so a content script handles the hold
+// gesture on the DOM button, and a composer action portals the pill beside it.
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
+import { definePluginApp, useComposer } from "@get-bb/plugin-sdk/app";
 import { cn } from "@/lib/utils";
-
-const PLUGIN_ID = "voice-mode";
-
-type Phase = "off" | "connecting" | "listening" | "speaking" | "error";
-
-function base64FromInt16(samples: Int16Array): string {
-  const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
-}
-
-function float32FromBase64Pcm16(base64: string): Float32Array<ArrayBuffer> {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const pcm = new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2));
-  const out = new Float32Array(pcm.length);
-  for (let i = 0; i < pcm.length; i++) out[i] = pcm[i] / 0x8000;
-  return out;
-}
-
-/** Plays 24 kHz PCM chunks back to back and can drop everything queued. */
-class Player {
-  private readonly ctx: AudioContext;
-  private playhead = 0;
-  private readonly sources = new Set<AudioBufferSourceNode>();
-  onIdle: (() => void) | null = null;
-
-  constructor(sampleRate: number) {
-    this.ctx = new AudioContext({ sampleRate });
-  }
-
-  get playing(): boolean {
-    return this.sources.size > 0;
-  }
-
-  enqueue(base64: string) {
-    const samples = float32FromBase64Pcm16(base64);
-    if (samples.length === 0) return;
-    const buffer = this.ctx.createBuffer(1, samples.length, this.ctx.sampleRate);
-    buffer.copyToChannel(samples, 0);
-    const source = this.ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(this.ctx.destination);
-    const startAt = Math.max(this.ctx.currentTime + 0.02, this.playhead);
-    source.start(startAt);
-    this.playhead = startAt + buffer.duration;
-    this.sources.add(source);
-    source.onended = () => {
-      this.sources.delete(source);
-      if (this.sources.size === 0) this.onIdle?.();
-    };
-  }
-
-  interrupt() {
-    for (const source of this.sources) {
-      source.onended = null;
-      try {
-        source.stop();
-      } catch {
-        // already stopped
-      }
-    }
-    this.sources.clear();
-    this.playhead = 0;
-    this.onIdle?.();
-  }
-
-  async close() {
-    this.interrupt();
-    await this.ctx.close().catch(() => undefined);
-  }
-}
-
-// Local barge-in: the proxy can only interrupt audio it is still generating,
-// and it sends audio faster than real time. If the user talks over audio we
-// already buffered, cut playback here. ~200 ms above this RMS counts as speech;
-// echo cancellation keeps the model's own voice well below it.
-const BARGE_IN_RMS = 0.04;
-const BARGE_IN_CHUNKS = 3;
-
-/** Captures the mic at the session's input rate as PCM16 chunks. */
-// While muted the mic keeps running but sends digital silence, so the session
-// stays open and the server VAD still sees the end of any cut-off utterance.
-async function startMic(sampleRate: number, isMuted: () => boolean, onChunk: (base64: string, rms: number) => void) {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
-  const ctx = new AudioContext({ sampleRate });
-  const source = ctx.createMediaStreamSource(stream);
-  // ScriptProcessor avoids loading a worklet module under bb's CSP; 1024
-  // frames at 16 kHz is a 64 ms chunk.
-  const processor = ctx.createScriptProcessor(1024, 1, 1);
-  processor.onaudioprocess = (event) => {
-    const input = event.inputBuffer.getChannelData(0);
-    const pcm = new Int16Array(input.length);
-    if (isMuted()) {
-      onChunk(base64FromInt16(pcm), 0);
-      return;
-    }
-    let energy = 0;
-    for (let i = 0; i < input.length; i++) {
-      const s = Math.max(-1, Math.min(1, input[i]));
-      energy += s * s;
-      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-    }
-    onChunk(base64FromInt16(pcm), Math.sqrt(energy / input.length));
-  };
-  const sink = ctx.createGain();
-  sink.gain.value = 0;
-  source.connect(processor);
-  processor.connect(sink);
-  sink.connect(ctx.destination);
-  return async () => {
-    processor.onaudioprocess = null;
-    stream.getTracks().forEach((track) => track.stop());
-    await ctx.close().catch(() => undefined);
-  };
-}
-
-function sessionUrl(threadId: string): string {
-  const url = new URL(`/api/v1/plugins/${PLUGIN_ID}/http/session`, window.location.href);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("threadId", threadId);
-  return url.toString();
-}
-
-function useVoiceSession(threadId: string) {
-  const [phase, setPhase] = useState<Phase>("off");
-  const [caption, setCaption] = useState<string>("");
-  const [agentStatus, setAgentStatus] = useState<string | null>(null);
-  const [muted, setMutedState] = useState(false);
-  const mutedRef = useRef(false);
-  const teardown = useRef<(() => Promise<void>) | null>(null);
-
-  const setMuted = useCallback((next: boolean) => {
-    mutedRef.current = next;
-    setMutedState(next);
-  }, []);
-
-  const stop = useCallback(async () => {
-    const run = teardown.current;
-    teardown.current = null;
-    await run?.();
-  }, []);
-
-  const start = useCallback(async () => {
-    if (teardown.current) return;
-    setPhase("connecting");
-    setCaption("");
-    const ws = new WebSocket(sessionUrl(threadId));
-    let player: Player | null = null;
-    let stopMic: (() => Promise<void>) | null = null;
-    let ended = false;
-    const send = (message: BrowserToServer) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
-    };
-    const cleanup = async (nextPhase: Phase = "off") => {
-      if (ended) return;
-      ended = true;
-      teardown.current = null;
-      send({ type: "END" });
-      ws.close();
-      await stopMic?.();
-      await player?.close();
-      setMuted(false);
-      setPhase(nextPhase);
-    };
-    teardown.current = () => cleanup("off");
-
-    ws.onmessage = async (event) => {
-      const message = JSON.parse(String(event.data)) as ServerToBrowser;
-      switch (message.type) {
-        case "READY":
-          player = new Player(message.outputHz);
-          player.onIdle = () => setPhase((p) => (p === "speaking" ? "listening" : p));
-          try {
-            let loudChunks = 0;
-            stopMic = await startMic(message.inputHz, () => mutedRef.current, (base64Data, rms) => {
-              send({ type: "AUDIO", base64Data });
-              loudChunks = rms > BARGE_IN_RMS ? loudChunks + 1 : 0;
-              if (loudChunks >= BARGE_IN_CHUNKS && player?.playing) {
-                player.interrupt();
-                setPhase("listening");
-              }
-            });
-            // The user may have stopped while the permission prompt was open.
-            if (ended) {
-              await stopMic();
-              break;
-            }
-            setPhase("listening");
-          } catch (error) {
-            setCaption(`Microphone unavailable: ${error instanceof Error ? error.message : String(error)}`);
-            await cleanup("error");
-          }
-          break;
-        case "AUDIO":
-          player?.enqueue(message.base64Data);
-          setPhase("speaking");
-          break;
-        case "INTERRUPTION":
-          player?.interrupt();
-          setPhase("listening");
-          break;
-        case "TRANSCRIPT":
-          setCaption(`${message.role === "user" ? "You" : "Voice"}: ${message.text}`);
-          break;
-        case "TOOL":
-          setCaption(
-            message.name === "send_to_agent" ? `Sent to agent: ${message.detail}` : message.name === "stop_agent" ? "Stopped the agent" : `Agent: ${message.detail}`,
-          );
-          break;
-        case "AGENT_STATUS":
-          setAgentStatus(message.status);
-          break;
-        case "ERROR":
-          setCaption(message.message);
-          await cleanup("error");
-          break;
-        case "ENDED":
-          await cleanup("off");
-          break;
-      }
-    };
-    ws.onerror = () => {
-      setCaption("Could not reach the Voice Mode backend");
-      void cleanup("error");
-    };
-    ws.onclose = () => void cleanup("off");
-  }, [threadId, setMuted]);
-
-  useEffect(() => () => void stop(), [stop]);
-
-  return { phase, caption, agentStatus, muted, setMuted, start, stop };
-}
+import { isLive, sessionFor, stopAllSessions, type Phase, type VoiceSession } from "./session";
+import { mountMicHold, MIC_SELECTOR, THREAD_ATTR, LIVE_ATTR } from "./mic-hold";
+import "./app.css";
 
 const LABELS: Record<Phase, string> = {
-  off: "Start voice mode",
+  off: "Voice mode",
   connecting: "Connecting…",
   listening: "Listening",
   speaking: "Speaking",
   error: "Voice mode error",
 };
+const ERROR_DISMISS_MS = 6000;
 
-// Codex-style voice glyph: five rounded bars, tallest in the middle. Static
-// when off; the bars bounce while connecting, listening, or speaking.
-const WAVE_BARS = [
-  { x: 2, h: 6 },
-  { x: 6, h: 12 },
-  { x: 10, h: 18 },
-  { x: 14, h: 12 },
-  { x: 18, h: 6 },
-];
+function useVoiceState(session: VoiceSession) {
+  return useSyncExternalStore(session.subscribe, session.getState);
+}
 
-const WAVE_CSS = `
-@keyframes voice-mode-bar { 0%, 100% { transform: scaleY(0.45); } 50% { transform: scaleY(1); } }
-.voice-mode-wave rect { transform-box: fill-box; transform-origin: center; }
-.voice-mode-wave[data-live="true"] rect { animation: voice-mode-bar 0.9s ease-in-out infinite; }
-.voice-mode-wave[data-phase="connecting"] rect { animation-duration: 1.4s; opacity: 0.6; }
-.voice-mode-wave[data-phase="speaking"] rect { animation-duration: 0.6s; }
-@media (prefers-reduced-motion: reduce) { .voice-mode-wave rect { animation: none !important; } }
-`;
+// Codex-style waveform: seven rounded bars, tallest in the middle, driven by
+// the live audio level (mic while listening, the model's voice while speaking).
+const PROFILE = [0.35, 0.6, 0.85, 1, 0.85, 0.6, 0.35];
+const BAR_W = 2.5;
+const GAP = 1.5;
+const H = 16;
+const MIN_H = 2.5;
 
-function VoiceWaveIcon({ phase, className }: { phase: Phase; className?: string }) {
-  const live = phase === "connecting" || phase === "listening" || phase === "speaking";
+function LevelWave({ session, phase, muted }: { session: VoiceSession; phase: Phase; muted: boolean }) {
+  const bars = useRef<(SVGRectElement | null)[]>([]);
+  useEffect(() => {
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const current = PROFILE.map(() => MIN_H);
+    let frame = 0;
+    const tick = (now: number) => {
+      const level = session.level();
+      const gain = phase === "speaking" ? 5 : 7;
+      PROFILE.forEach((weight, i) => {
+        let amount: number;
+        if (muted) amount = 0;
+        else if (phase === "connecting") amount = reduce ? 0.4 : 0.25 + 0.35 * (0.5 + 0.5 * Math.sin(now / 220 - i * 0.7));
+        else if (reduce) amount = 0.5;
+        else {
+          const wobble = 0.12 + 0.06 * Math.sin(now / 160 + i * 1.3);
+          amount = Math.min(1, wobble + level * gain * (0.75 + 0.25 * Math.sin(now / 90 + i * 2.1)));
+        }
+        const target = MIN_H + (H - MIN_H) * weight * amount;
+        current[i] += (target - current[i]) * 0.35;
+        const rect = bars.current[i];
+        if (rect) {
+          rect.setAttribute("height", current[i].toFixed(2));
+          rect.setAttribute("y", ((H - current[i]) / 2).toFixed(2));
+        }
+      });
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [session, phase, muted]);
+
+  const width = PROFILE.length * BAR_W + (PROFILE.length - 1) * GAP;
   return (
-    <svg
-      viewBox="0 0 22 22"
-      fill="currentColor"
-      aria-hidden
-      data-phase={phase}
-      data-live={live}
-      className={cn("voice-mode-wave size-4", className)}
-    >
-      <style>{WAVE_CSS}</style>
-      {WAVE_BARS.map((bar, i) => (
+    <svg viewBox={`0 0 ${width} ${H}`} width={width} height={H} fill="currentColor" aria-hidden className="shrink-0">
+      {PROFILE.map((_, i) => (
         <rect
-          key={bar.x}
-          x={bar.x}
-          y={(22 - bar.h) / 2}
-          width={2.2}
-          height={bar.h}
-          rx={1.1}
-          style={{ animationDelay: `${[0.3, 0.15, 0, 0.15, 0.3][i]}s` }}
+          key={i}
+          ref={(el) => {
+            bars.current[i] = el;
+          }}
+          x={i * (BAR_W + GAP)}
+          y={(H - MIN_H) / 2}
+          width={BAR_W}
+          height={MIN_H}
+          rx={BAR_W / 2}
         />
       ))}
     </svg>
   );
 }
 
-// Lucide mic / mic-off glyphs, inlined because bb's icon set lacks MicOff.
-function MicIcon({ muted }: { muted: boolean }) {
+// Lucide mic / mic-off / x glyphs, inlined because bb's icon set lacks MicOff.
+function Glyph({ name }: { name: "mic" | "mic-off" | "x" | "alert" }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -314,7 +102,7 @@ function MicIcon({ muted }: { muted: boolean }) {
       aria-hidden
       className="size-4"
     >
-      {muted ? (
+      {name === "mic-off" ? (
         <>
           <line x1="2" x2="22" y1="2" y2="22" />
           <path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" />
@@ -323,73 +111,180 @@ function MicIcon({ muted }: { muted: boolean }) {
           <path d="M9 9v3a3 3 0 0 0 5.12 2.12" />
           <line x1="12" x2="12" y1="19" y2="22" />
         </>
-      ) : (
+      ) : name === "mic" ? (
         <>
           <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
           <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
           <line x1="12" x2="12" y1="19" y2="22" />
+        </>
+      ) : name === "x" ? (
+        <>
+          <path d="M18 6 6 18" />
+          <path d="m6 6 12 12" />
+        </>
+      ) : (
+        <>
+          <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+          <path d="M12 9v4" />
+          <path d="M12 17h.01" />
         </>
       )}
     </svg>
   );
 }
 
-function VoiceButton({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
-  const { phase, caption, agentStatus, muted, setMuted, start, stop } = useVoiceSession(threadId);
-  const live = phase === "connecting" || phase === "listening" || phase === "speaking";
+const PILL_BUTTON =
+  "inline-flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+function VoicePill({ session }: { session: VoiceSession }) {
+  const { phase, muted, caption, agentStatus } = useVoiceState(session);
+
+  useEffect(() => {
+    if (phase !== "error") return;
+    const timer = setTimeout(() => session.dismissError(), ERROR_DISMISS_MS);
+    return () => clearTimeout(timer);
+  }, [phase, session]);
+
+  if (phase === "off") return null;
   const micActive = phase === "listening" || phase === "speaking";
-  const status = muted && phase === "listening" ? "Muted" : LABELS[phase];
-  const label = live ? `Stop voice mode (${status.toLowerCase()})` : LABELS[phase];
-  const tooltip = [label, agentStatus && live ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
+  const status = phase === "error" ? "Voice error" : muted && micActive ? "Muted" : LABELS[phase];
+  const detail = [agentStatus ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
 
   return (
-    <div className="flex items-center gap-1.5">
-      <button
-        type="button"
-        aria-label={label}
-        aria-pressed={live}
-        title={tooltip}
-        onClick={() => void (live ? stop() : start())}
-        className={cn(
-          "inline-flex h-7 items-center gap-1.5 rounded-md px-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-          live && "text-foreground",
-          phase === "error" && "text-destructive",
-        )}
-      >
-        <VoiceWaveIcon
-          phase={phase}
-          className={cn(phase === "listening" && !muted && "text-red-500", phase === "speaking" && "text-sky-500")}
-        />
-        {live && !isCompactViewport ? <span className="text-xs">{status}</span> : null}
-      </button>
+    <div
+      data-voice-mode-pill=""
+      data-phase={phase}
+      data-muted={muted}
+      className={cn(
+        "voice-mode-pill inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-border/60 bg-state-hover pl-2.5 pr-1 text-foreground",
+        phase === "speaking" && "text-sky-500",
+        phase === "error" && "text-destructive",
+        muted && micActive && "text-muted-foreground",
+      )}
+    >
+      <span role="status" aria-live="polite" title={detail || undefined} className="inline-flex items-center gap-2 pr-1">
+        {phase === "error" ? <Glyph name="alert" /> : <LevelWave session={session} phase={phase} muted={muted && micActive} />}
+        <span className="text-xs font-medium text-foreground/80">{status}</span>
+      </span>
       {micActive ? (
         <button
           type="button"
           aria-label={muted ? "Unmute microphone" : "Mute microphone"}
           aria-pressed={muted}
-          title={muted ? "Unmute microphone" : "Mute microphone (session stays open)"}
-          onClick={() => setMuted(!muted)}
-          className={cn(
-            "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-            muted && "bg-accent text-red-500",
-          )}
+          title={muted ? "Unmute microphone" : "Mute microphone (voice mode stays on)"}
+          onClick={() => session.setMuted(!muted)}
+          className={cn(PILL_BUTTON, muted && "bg-background text-red-500 hover:text-red-500")}
         >
-          <MicIcon muted={muted} />
+          <Glyph name={muted ? "mic-off" : "mic"} />
         </button>
       ) : null}
-      {live && caption && !isCompactViewport ? (
-        <span className="max-w-64 truncate text-xs text-muted-foreground" aria-live="polite">
-          {caption}
-        </span>
-      ) : null}
+      <button
+        type="button"
+        aria-label={phase === "error" ? "Dismiss voice mode error" : "End voice mode"}
+        title={phase === "error" ? caption || "Dismiss" : "End voice mode"}
+        onClick={() => void (phase === "error" ? session.dismissError() : session.stop())}
+        className={PILL_BUTTON}
+      >
+        <Glyph name="x" />
+      </button>
     </div>
   );
 }
 
+/**
+ * Mounted once per thread composer. Tags the composer so the mic's hold
+ * gesture knows its thread, keeps a portal host beside the mic, and renders
+ * the pill there (inline here when the mic isn't rendered).
+ */
+function ComposerVoice() {
+  const composer = useComposer();
+  const threadId = composer.scope.kind === "thread" ? composer.scope.threadId : null;
+  return threadId ? <ThreadComposerVoice threadId={threadId} /> : null;
+}
+
+function ThreadComposerVoice({ threadId }: { threadId: string }) {
+  const session = sessionFor(threadId);
+  const { phase } = useVoiceState(session);
+  const anchor = useRef<HTMLSpanElement>(null);
+  const [host, setHost] = useState<HTMLElement | null>(null);
+  const showing = phase !== "off";
+
+  useEffect(() => session.retain(), [session]);
+
+  useEffect(() => {
+    const start = anchor.current;
+    if (!start) return;
+    // The mic can render after this action does, so key off the composer form
+    // and look the mic up on every change.
+    const composerRoot = start.closest("form");
+    if (!composerRoot) return;
+    composerRoot.setAttribute(THREAD_ATTR, threadId);
+    const portal = document.createElement("span");
+    portal.className = "voice-mode-host";
+    let frame = 0;
+    const place = () => {
+      frame = 0;
+      const wrapper = composerRoot.querySelector(MIC_SELECTOR)?.parentElement;
+      if (wrapper && portal.nextSibling !== wrapper) wrapper.before(portal);
+      setHost(portal.isConnected ? portal : null);
+    };
+    place();
+    const observer = new MutationObserver(() => {
+      if (!frame) frame = requestAnimationFrame(place);
+    });
+    observer.observe(composerRoot, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+      portal.remove();
+      composerRoot.removeAttribute(THREAD_ATTR);
+      composerRoot.removeAttribute(LIVE_ATTR);
+      setHost(null);
+    };
+  }, [threadId]);
+
+  // Hide bb's mic while the pill stands in for it.
+  useEffect(() => {
+    const root = host?.closest(`[${THREAD_ATTR}]`);
+    if (!root) return;
+    if (showing) root.setAttribute(LIVE_ATTR, "");
+    else root.removeAttribute(LIVE_ATTR);
+  }, [host, showing]);
+
+  const pill = <VoicePill session={session} />;
+  return (
+    <>
+      <span ref={anchor} hidden />
+      {host ? createPortal(pill, host) : isLive(phase) || phase === "error" ? pill : null}
+    </>
+  );
+}
+
 export default definePluginApp((app) => {
-  app.slots.experimental_threadHeaderAction({
+  app.composer.customize({
     id: "voice-mode",
-    title: "Voice mode",
-    component: ({ threadId, isCompactViewport }) => <VoiceButton threadId={threadId} isCompactViewport={isCompactViewport} />,
+    scopes: ["thread"],
+    actions: [{ id: "voice-mode", component: ComposerVoice }],
+  });
+
+  app.composer.experimental_registerCommand({
+    id: "toggle-voice-mode",
+    title: "Toggle voice mode",
+    run({ composer }) {
+      if (composer.scope.kind !== "thread") return;
+      const session = sessionFor(composer.scope.threadId);
+      void (isLive(session.state.phase) ? session.stop() : session.start());
+    },
+  });
+
+  app.contentScripts.register({
+    id: "mic-hold",
+    mount({ signal }) {
+      const unmount = mountMicHold(signal);
+      return () => {
+        unmount();
+        void stopAllSessions();
+      };
+    },
   });
 });
