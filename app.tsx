@@ -214,8 +214,8 @@ function ComposerVoice() {
 }
 
 /**
- * Copy the look of bb's (hidden) send button so the waveform matches it under
- * any theme, e.g. a theme that makes send a circle.
+ * Copy the size and look of bb's (hidden) send control so the waveform matches
+ * it under any theme, e.g. a theme that makes send a circle.
  */
 function useSendButtonLook(ref: React.RefObject<HTMLElement | null>) {
   const [look, setLook] = useState<React.CSSProperties>({});
@@ -224,19 +224,38 @@ function useSendButtonLook(ref: React.RefObject<HTMLElement | null>) {
     if (!form) return;
     const read = () => {
       const menu = form.querySelector<HTMLElement>(SEND_SELECTOR);
-      const action = menu?.querySelector<HTMLElement>("[data-promptbox-submit-action]");
-      if (!menu || !action) return;
-      const a = getComputedStyle(action);
+      if (!menu) return;
+      // The menu is display:none while we stand in for it, and bb collapses its
+      // model chevron (w-0) while the composer is empty, growing it (w-6) as you
+      // type. Un-hide and expand it for one synchronous layout read (no paint in
+      // between) so the waveform takes the size send has once you type.
+      const hider = menu.closest<HTMLElement>(`[${VOICE_SEND_ATTR}]`);
+      hider?.removeAttribute(VOICE_SEND_ATTR);
+      const chevron = Array.from(menu.children).find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains("w-0"));
+      const transition = chevron?.style.transition ?? "";
+      if (chevron) {
+        chevron.style.transition = "none";
+        chevron.classList.replace("w-0", "w-6");
+      }
+      const rect = menu.getBoundingClientRect();
       const m = getComputedStyle(menu);
       const next: React.CSSProperties = {
-        borderRadius: a.borderTopLeftRadius,
+        // The whole send control (arrow plus model chevron), so swapping
+        // between it and the waveform doesn't change the button's size.
+        width: `${rect.width}px`,
+        height: `${rect.height}px`,
+        padding: 0,
+        borderRadius: m.borderTopLeftRadius,
         backgroundColor: m.backgroundColor,
         color: m.color,
       };
-      // A fixed square (e.g. a circular theme) rather than bb's auto-width pill.
-      if (a.width.endsWith("px") && a.width === a.height) {
-        Object.assign(next, { width: a.width, height: a.height, padding: 0 });
+      if (chevron) {
+        chevron.classList.replace("w-6", "w-0");
+        void chevron.offsetWidth;
+        chevron.style.transition = transition;
       }
+      hider?.setAttribute(VOICE_SEND_ATTR, "");
+      if (!rect.width || !rect.height) return;
       setLook((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
     };
     read();
@@ -244,7 +263,12 @@ function useSendButtonLook(ref: React.RefObject<HTMLElement | null>) {
     const observer = new MutationObserver(read);
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
     observer.observe(document.head, { childList: true, subtree: true });
-    return () => observer.disconnect();
+    // Touch layouts size send differently (h-10); follow viewport changes too.
+    window.addEventListener("resize", read);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", read);
+    };
   }, [ref]);
   return look;
 }

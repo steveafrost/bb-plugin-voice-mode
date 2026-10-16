@@ -5,7 +5,10 @@
   display: contents;
 }
 
-[data-voice-mode-send] [data-promptbox-send-menu] {
+/* Hide the whole submit group, not just the menu inside it: an empty group is
+   still a flex item and would add a trailing gap, nudging the waveform (and
+   the mic) left of where send sits. */
+[data-voice-mode-send] [data-promptbox-submit-group] {
   display: none;
 }
 
