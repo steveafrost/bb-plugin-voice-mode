@@ -49,8 +49,10 @@ WebSocket route.
 ## Use
 
 - Empty composer with the agent idle → click the waveform ("Start new voice
-  chat"). While the agent works, run **Toggle voice mode** from the command
-  palette instead.
+  chat"), or press **Ctrl+Shift+V** (Codex's shortcut) any time, including
+  while the agent works. The same keys end the session. Rebind them in
+  Settings → Keyboard ("Start or end voice chat"); the command is also in the
+  palette.
 - Talk normally. Ask for anything that needs the codebase and the voice model
   sends it to the agent; ask "is it done?" any time; say "stop" to stop the
   agent. If the agent stops to ask you something (a question or a

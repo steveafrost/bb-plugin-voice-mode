@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-voice-mode",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "private": true,
   "description": "Talk to a bb thread hands-free: full-duplex, interruptible realtime voice that hands work to the thread's agent.",

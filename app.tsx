@@ -496,7 +496,9 @@ export default definePluginApp((app) => {
 
   app.composer.experimental_registerCommand({
     id: "toggle-voice-mode",
-    title: "Toggle voice mode",
+    title: "Start or end voice chat",
+    // Codex's binding. Rebind or clear it in Settings → Keyboard.
+    defaultShortcut: { key: "v", control: true, shift: true },
     run({ composer }) {
       if (composer.scope.kind !== "thread") return;
       const session = sessionFor(composer.scope.threadId);

@@ -2,7 +2,7 @@ Talk to a thread's agent hands-free, the way ChatGPT and Codex voice work.
 
 ## What you get
 
-- **A waveform where send is** when the composer is empty and the agent is idle. Click it to start a voice chat; type and the send arrow comes back. While the agent works, use **Toggle voice mode**.
+- **A waveform where send is** when the composer is empty and the agent is idle. Click it to start a voice chat; type and the send arrow comes back. Or press **Ctrl+Shift+V** any time, like Codex; rebind it in Settings → Keyboard.
 - **Full duplex with barge-in.** Talk over the voice and it stops at once; it knows how much you heard.
 - **The agent does the work.** The voice model forwards requests to the thread's agent, answers "is it done?", stops the agent when you say stop, tells you the result when the turn ends, and tells you when the agent is waiting on you in bb.
 - **A live pill** in place of the mic: waveform that follows your voice and the reply, status, mute, end.
