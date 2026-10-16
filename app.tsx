@@ -205,14 +205,54 @@ function ComposerVoice() {
   return threadId ? <ThreadComposerVoice threadId={threadId} canStart={composer.isEmpty && !composer.isRunning} /> : null;
 }
 
+/**
+ * Copy the look of bb's (hidden) send button so the waveform matches it under
+ * any theme, e.g. a theme that makes send a circle.
+ */
+function useSendButtonLook(ref: React.RefObject<HTMLElement | null>) {
+  const [look, setLook] = useState<React.CSSProperties>({});
+  useEffect(() => {
+    const form = ref.current?.closest("form");
+    if (!form) return;
+    const read = () => {
+      const menu = form.querySelector<HTMLElement>(SEND_SELECTOR);
+      const action = menu?.querySelector<HTMLElement>("[data-promptbox-submit-action]");
+      if (!menu || !action) return;
+      const a = getComputedStyle(action);
+      const m = getComputedStyle(menu);
+      const next: React.CSSProperties = {
+        borderRadius: a.borderTopLeftRadius,
+        backgroundColor: m.backgroundColor,
+        color: m.color,
+      };
+      // A fixed square (e.g. a circular theme) rather than bb's auto-width pill.
+      if (a.width.endsWith("px") && a.width === a.height) {
+        Object.assign(next, { width: a.width, height: a.height, padding: 0 });
+      }
+      setLook((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    };
+    read();
+    // Theme switches restyle the document; re-read when they do.
+    const observer = new MutationObserver(read);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    observer.observe(document.head, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [ref]);
+  return look;
+}
+
 function StartVoiceButton({ session }: { session: VoiceSession }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const look = useSendButtonLook(ref);
   return (
     <span className="voice-mode-start ml-1 inline-flex" data-tip="Start new voice chat">
       <button
+        ref={ref}
         type="button"
         aria-label="Start new voice chat"
         onClick={() => void session.start()}
-        className="inline-flex h-8 cursor-pointer items-center justify-center rounded-md bg-foreground px-2 text-background transition-colors duration-150 hover:bg-foreground/90 hover:duration-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-md:pointer-coarse:h-10 max-md:pointer-coarse:px-3"
+        style={look}
+        className="inline-flex h-8 cursor-pointer items-center justify-center rounded-md bg-foreground px-2 text-background transition-[filter] duration-150 hover:brightness-90 hover:duration-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-md:pointer-coarse:h-10 max-md:pointer-coarse:px-3"
       >
         <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden className="size-4">
           {[4, 8, 12, 8, 4].map((h, i) => (
