@@ -1,19 +1,16 @@
-// Voice Mode frontend. Voice mode lives on bb's own composer mic:
+// Voice Mode frontend, modeled on Codex: when the thread composer is empty the
+// send button becomes a waveform button ("Start new voice chat"). Typing brings
+// the send arrow back; once the message is sent and the box is empty again, the
+// waveform returns. While live, a pill (level waveform, status, mute, end)
+// stands in for bb's mic, and the send button reappears only if you type.
 //
-// - Click the mic: bb's dictation, unchanged.
-// - Press and hold the mic: the glyph morphs into a waveform and, once held,
-//   starts a full-duplex voice session with the thread's agent.
-// - While live, the mic is replaced by a Codex-style pill: a level-reactive
-//   waveform, status, a mute toggle, and an end button.
-//
-// bb exposes no SDK hook on its mic, so a content script handles the hold
-// gesture on the DOM button, and a composer action portals the pill beside it.
+// bb has no SDK hook on its send button, so a composer action portals our UI
+// beside it and flags the composer form so app.css can hide bb's controls.
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { definePluginApp, useComposer } from "@get-bb/plugin-sdk/app";
 import { cn } from "@/lib/utils";
 import { isLive, sessionFor, stopAllSessions, type Phase, type VoiceSession } from "./session";
-import { mountMicHold, MIC_SELECTOR, THREAD_ATTR, LIVE_ATTR } from "./mic-hold";
 import "./app.css";
 
 const LABELS: Record<Phase, string> = {
@@ -24,6 +21,12 @@ const LABELS: Record<Phase, string> = {
   error: "Voice mode error",
 };
 const ERROR_DISMISS_MS = 6000;
+
+const SEND_SELECTOR = "[data-promptbox-send-menu]";
+/** Set on the composer form while the waveform button replaces bb's send button. */
+const VOICE_SEND_ATTR = "data-voice-mode-send";
+/** Set on the composer form while the voice pill replaces bb's mic. */
+const LIVE_ATTR = "data-voice-mode-live";
 
 function useVoiceState(session: VoiceSession) {
   return useSyncExternalStore(session.subscribe, session.getState);
@@ -199,10 +202,29 @@ function VoicePill({ session }: { session: VoiceSession }) {
 function ComposerVoice() {
   const composer = useComposer();
   const threadId = composer.scope.kind === "thread" ? composer.scope.threadId : null;
-  return threadId ? <ThreadComposerVoice threadId={threadId} /> : null;
+  return threadId ? <ThreadComposerVoice threadId={threadId} canStart={composer.isEmpty && !composer.isRunning} /> : null;
 }
 
-function ThreadComposerVoice({ threadId }: { threadId: string }) {
+function StartVoiceButton({ session }: { session: VoiceSession }) {
+  return (
+    <span className="voice-mode-start ml-1 inline-flex" data-tip="Start new voice chat">
+      <button
+        type="button"
+        aria-label="Start new voice chat"
+        onClick={() => void session.start()}
+        className="inline-flex h-8 cursor-pointer items-center justify-center rounded-md bg-foreground px-2 text-background transition-colors duration-150 hover:bg-foreground/90 hover:duration-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-md:pointer-coarse:h-10 max-md:pointer-coarse:px-3"
+      >
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden className="size-4">
+          {[4, 8, 12, 8, 4].map((h, i) => (
+            <rect key={i} x={1.5 + i * 2.75} y={(16 - h) / 2} width={1.75} height={h} rx={0.875} />
+          ))}
+        </svg>
+      </button>
+    </span>
+  );
+}
+
+function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStart: boolean }) {
   const session = sessionFor(threadId);
   const { phase } = useVoiceState(session);
   const anchor = useRef<HTMLSpanElement>(null);
@@ -214,18 +236,17 @@ function ThreadComposerVoice({ threadId }: { threadId: string }) {
   useEffect(() => {
     const start = anchor.current;
     if (!start) return;
-    // The mic can render after this action does, so key off the composer form
-    // and look the mic up on every change.
+    // bb's buttons can render after this action does, so key off the composer
+    // form and look them up on every change.
     const composerRoot = start.closest("form");
     if (!composerRoot) return;
-    composerRoot.setAttribute(THREAD_ATTR, threadId);
     const portal = document.createElement("span");
     portal.className = "voice-mode-host";
     let frame = 0;
     const place = () => {
       frame = 0;
-      const wrapper = composerRoot.querySelector(MIC_SELECTOR)?.parentElement;
-      if (wrapper && portal.nextSibling !== wrapper) wrapper.before(portal);
+      const group = composerRoot.querySelector(SEND_SELECTOR)?.closest("[data-promptbox-submit-group]");
+      if (group && portal.nextSibling !== group) group.before(portal);
       setHost(portal.isConnected ? portal : null);
     };
     place();
@@ -237,25 +258,28 @@ function ThreadComposerVoice({ threadId }: { threadId: string }) {
       observer.disconnect();
       cancelAnimationFrame(frame);
       portal.remove();
-      composerRoot.removeAttribute(THREAD_ATTR);
+      composerRoot.removeAttribute(VOICE_SEND_ATTR);
       composerRoot.removeAttribute(LIVE_ATTR);
       setHost(null);
     };
   }, [threadId]);
 
-  // Hide bb's mic while the pill stands in for it.
+  // Empty and idle: our waveform stands in for bb's send button. Live: the
+  // pill stands in for bb's mic (and for send, until you type).
+  const showStart = canStart && phase === "off";
+  const hideSend = canStart && phase !== "error";
   useEffect(() => {
-    const root = host?.closest(`[${THREAD_ATTR}]`);
+    const root = host?.closest("form");
     if (!root) return;
-    if (showing) root.setAttribute(LIVE_ATTR, "");
-    else root.removeAttribute(LIVE_ATTR);
-  }, [host, showing]);
+    root.toggleAttribute(VOICE_SEND_ATTR, hideSend);
+    root.toggleAttribute(LIVE_ATTR, showing);
+  }, [host, hideSend, showing]);
 
-  const pill = <VoicePill session={session} />;
+  const content = showStart ? <StartVoiceButton session={session} /> : <VoicePill session={session} />;
   return (
     <>
       <span ref={anchor} hidden />
-      {host ? createPortal(pill, host) : isLive(phase) || phase === "error" ? pill : null}
+      {host ? createPortal(content, host) : isLive(phase) || phase === "error" ? content : null}
     </>
   );
 }
@@ -278,13 +302,9 @@ export default definePluginApp((app) => {
   });
 
   app.contentScripts.register({
-    id: "mic-hold",
-    mount({ signal }) {
-      const unmount = mountMicHold(signal);
-      return () => {
-        unmount();
-        void stopAllSessions();
-      };
+    id: "voice-mode-cleanup",
+    mount() {
+      return () => void stopAllSessions();
     },
   });
 });

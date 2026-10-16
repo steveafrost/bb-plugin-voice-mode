@@ -5,8 +5,8 @@ description: How the Voice Mode plugin relays voice to a bb thread; use when a m
 
 # Voice Mode
 
-Pressing and holding the composer mic (a plain click is still bb dictation), or
-the "Toggle voice mode" command, starts a full-duplex voice session (Shopify AI
+When the thread composer is empty, its send button becomes a waveform ("Start
+new voice chat"); clicking it, or the "Toggle voice mode" command, starts a full-duplex voice session (Shopify AI
 Proxy realtime, Gemini Live by default). While live, the mic becomes a pill with
 a waveform, a mute toggle and an end button. A separate voice model talks with the
 user and forwards work to this thread with `send_to_agent`, which arrives as an
