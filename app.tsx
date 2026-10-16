@@ -150,13 +150,58 @@ const EXPAND_MS = 220;
  */
 const expandFrom = new WeakMap<VoiceSession, { width: number; background: string }>();
 
+/**
+ * Where the pill slides closed to: the same start box (mic plus waveform) and
+ * the mic alone, for when you typed during the session and send is back. Kept
+ * for the session's lifetime; the fallbacks are bb's default sizes.
+ */
+const restBox = new WeakMap<VoiceSession, { both: number; mic: number; background: string }>();
+const REST_FALLBACK = { both: 96, mic: 32, background: "transparent" };
+
 function rememberExpandFrom(session: VoiceSession, button: HTMLElement) {
   const right = button.getBoundingClientRect().right;
   // The mic sits left of the waveform and goes away with it, so start from its
   // left edge too; then nothing else in the composer row moves.
   const mic = button.closest("form")?.querySelector<HTMLElement>('button[aria-label="Start voice input"]');
   const left = mic?.getBoundingClientRect().width ? mic.getBoundingClientRect().left : button.getBoundingClientRect().left;
-  expandFrom.set(session, { width: right - left, background: getComputedStyle(button).backgroundColor });
+  const background = getComputedStyle(button).backgroundColor;
+  expandFrom.set(session, { width: right - left, background });
+  restBox.set(session, { both: right - left, mic: mic?.getBoundingClientRect().width || REST_FALLBACK.mic, background });
+}
+
+/**
+ * The reverse of opening: shrink the pill rightward (right edge fixed) into the
+ * box the mic and waveform (or just the mic, if send is showing) will take,
+ * then hand over to them.
+ */
+function useSlideClosed(
+  ref: React.RefObject<HTMLElement | null>,
+  session: VoiceSession,
+  closing: boolean,
+  toStart: boolean,
+  onClosed: () => void,
+) {
+  const done = useRef(onClosed);
+  done.current = onClosed;
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!closing) return;
+    if (!el) return void done.current();
+    const from = el.getBoundingClientRect().width;
+    for (const animation of el.getAnimations()) animation.cancel();
+    const rest = restBox.get(session) ?? REST_FALLBACK;
+    const to = toStart ? rest.both : rest.mic;
+    const clip = { overflow: "hidden", justifyContent: "flex-end" };
+    const animation = el.animate(
+      [
+        { ...clip, width: `${from}px` },
+        { ...clip, width: `${to}px`, borderColor: "transparent", backgroundColor: toStart ? rest.background : "transparent" },
+      ],
+      { duration: EXPAND_MS, easing: "cubic-bezier(0.3, 0, 0.8, 0.15)", fill: "forwards" },
+    );
+    animation.onfinish = () => done.current();
+    return () => animation.cancel();
+  }, [ref, session, closing, toStart]);
 }
 
 /**
@@ -194,10 +239,25 @@ function useSlidingWidth(ref: React.RefObject<HTMLElement | null>, session: Voic
   });
 }
 
-function VoicePill({ session }: { session: VoiceSession }) {
-  const { phase, muted, caption, agentStatus } = useVoiceState(session);
+function VoicePill({
+  session,
+  closing = false,
+  toStart = false,
+  onClosed = () => {},
+}: {
+  session: VoiceSession;
+  closing?: boolean;
+  toStart?: boolean;
+  onClosed?: () => void;
+}) {
+  const state = useVoiceState(session);
+  // While sliding closed, keep showing what the pill showed last.
+  const lastShown = useRef(state);
+  if (state.phase !== "off") lastShown.current = state;
+  const { phase, muted, caption, agentStatus } = closing && state.phase === "off" ? lastShown.current : state;
   const pill = useRef<HTMLDivElement>(null);
-  useSlidingWidth(pill, session, phase !== "off");
+  useSlidingWidth(pill, session, state.phase !== "off");
+  useSlideClosed(pill, session, closing && state.phase === "off", toStart, onClosed);
 
   useEffect(() => {
     if (phase !== "error") return;
@@ -360,7 +420,17 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
   const { phase } = useVoiceState(session);
   const anchor = useRef<HTMLSpanElement>(null);
   const [host, setHost] = useState<HTMLElement | null>(null);
-  const showing = phase !== "off";
+
+  // When a live session ends (end button, idle end, the socket closing), keep
+  // the pill up while it slides closed. Derived during render so the mic and
+  // waveform never flash in before the slide starts.
+  const [prevPhase, setPrevPhase] = useState(phase);
+  const [closing, setClosing] = useState(false);
+  if (phase !== prevPhase) {
+    setPrevPhase(phase);
+    setClosing(phase === "off" && isLive(prevPhase) && !matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+  const showing = phase !== "off" || closing;
 
   useEffect(() => session.retain(), [session]);
 
@@ -397,7 +467,7 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
 
   // Empty and idle: our waveform stands in for bb's send button. Live: the
   // pill stands in for bb's mic (and for send, until you type).
-  const showStart = canStart && phase === "off";
+  const showStart = canStart && phase === "off" && !closing;
   const hideSend = canStart && phase !== "error";
   useEffect(() => {
     const root = host?.closest("form");
@@ -406,11 +476,13 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
     root.toggleAttribute(LIVE_ATTR, showing);
   }, [host, hideSend, showing]);
 
-  const content = showStart ? <StartVoiceButton session={session} /> : <VoicePill session={session} />;
+  const content = showStart ? <StartVoiceButton session={session} /> : (
+    <VoicePill session={session} closing={closing} toStart={canStart} onClosed={() => setClosing(false)} />
+  );
   return (
     <>
       <span ref={anchor} hidden />
-      {host ? createPortal(content, host) : isLive(phase) || phase === "error" ? content : null}
+      {host ? createPortal(content, host) : isLive(phase) || phase === "error" || closing ? content : null}
     </>
   );
 }
