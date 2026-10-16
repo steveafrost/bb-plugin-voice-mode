@@ -6,7 +6,7 @@
 //
 // bb has no SDK hook on its send button, so a composer action portals our UI
 // beside it and flags the composer form so app.css can hide bb's controls.
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { definePluginApp, useComposer } from "@get-bb/plugin-sdk/app";
 import { isLive, sessionFor, stopAllSessions, type Phase, type VoiceSession } from "./session";
@@ -141,8 +141,63 @@ const PILL_BUTTON =
   "inline-flex size-6 items-center justify-center rounded-full transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const PILL_BUTTON_IDLE = `${PILL_BUTTON} text-muted-foreground hover:text-foreground`;
 
+/** How long the pill takes to slide open from the waveform button. */
+const EXPAND_MS = 220;
+
+/**
+ * Where the pill slides open from: the box the mic and waveform took up when
+ * you clicked start, keyed by session. Read once, by the pill that replaces them.
+ */
+const expandFrom = new WeakMap<VoiceSession, { width: number; background: string }>();
+
+function rememberExpandFrom(session: VoiceSession, button: HTMLElement) {
+  const right = button.getBoundingClientRect().right;
+  // The mic sits left of the waveform and goes away with it, so start from its
+  // left edge too; then nothing else in the composer row moves.
+  const mic = button.closest("form")?.querySelector<HTMLElement>('button[aria-label="Start voice input"]');
+  const left = mic?.getBoundingClientRect().width ? mic.getBoundingClientRect().left : button.getBoundingClientRect().left;
+  expandFrom.set(session, { width: right - left, background: getComputedStyle(button).backgroundColor });
+}
+
+/**
+ * Slide the pill open leftward (its right edge stays put) from the start box,
+ * then keep sliding as it changes width (status text, the mute button appearing)
+ * instead of popping to the new size.
+ */
+function useSlidingWidth(ref: React.RefObject<HTMLElement | null>, session: VoiceSession, shown: boolean) {
+  const last = useRef<number | null>(null);
+  const running = useRef<Animation | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!shown || !el) {
+      last.current = null;
+      return;
+    }
+    const opening = last.current === null ? expandFrom.get(session) : undefined;
+    expandFrom.delete(session);
+    // Mid-slide, start from where it is now, not where the last slide began.
+    const current = running.current?.playState === "running" ? el.getBoundingClientRect().width : last.current;
+    running.current?.cancel();
+    running.current = null;
+    const to = el.getBoundingClientRect().width;
+    const from = opening?.width ?? current;
+    last.current = to;
+    if (from === null || Math.abs(to - from) < 1 || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const clip = { overflow: "hidden", justifyContent: "flex-end" };
+    running.current = el.animate(
+      [
+        { ...clip, width: `${from}px`, ...(opening ? { backgroundColor: opening.background, borderColor: "transparent" } : {}) },
+        { ...clip, width: `${to}px` },
+      ],
+      { duration: EXPAND_MS, easing: "cubic-bezier(0.2, 0, 0, 1)" },
+    );
+  });
+}
+
 function VoicePill({ session }: { session: VoiceSession }) {
   const { phase, muted, caption, agentStatus } = useVoiceState(session);
+  const pill = useRef<HTMLDivElement>(null);
+  useSlidingWidth(pill, session, phase !== "off");
 
   useEffect(() => {
     if (phase !== "error") return;
@@ -159,6 +214,7 @@ function VoicePill({ session }: { session: VoiceSession }) {
 
   return (
     <div
+      ref={pill}
       data-voice-mode-pill=""
       data-phase={phase}
       data-muted={muted}
@@ -282,7 +338,10 @@ function StartVoiceButton({ session }: { session: VoiceSession }) {
         ref={ref}
         type="button"
         aria-label="Start new voice chat"
-        onClick={() => void session.start()}
+        onClick={(event) => {
+          rememberExpandFrom(session, event.currentTarget);
+          void session.start();
+        }}
         style={look}
         className="inline-flex h-8 cursor-pointer items-center justify-center rounded-md bg-foreground px-2 text-background transition-[filter] duration-150 hover:brightness-90 hover:duration-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-md:pointer-coarse:h-10 max-md:pointer-coarse:px-3"
       >
