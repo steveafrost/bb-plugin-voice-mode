@@ -9,7 +9,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { definePluginApp, useComposer } from "@get-bb/plugin-sdk/app";
-import { cn } from "@/lib/utils";
 import { isLive, sessionFor, stopAllSessions, type Phase, type VoiceSession } from "./session";
 import "./app.css";
 
@@ -21,6 +20,8 @@ const LABELS: Record<Phase, string> = {
   error: "Voice mode error",
 };
 const ERROR_DISMISS_MS = 6000;
+
+const cn = (...classes: (string | false | null | undefined)[]) => classes.filter(Boolean).join(" ");
 
 const SEND_SELECTOR = "[data-promptbox-send-menu]";
 /** Set on the composer form while the waveform button replaces bb's send button. */
@@ -137,7 +138,8 @@ function Glyph({ name }: { name: "mic" | "mic-off" | "x" | "alert" }) {
 }
 
 const PILL_BUTTON =
-  "inline-flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+  "inline-flex size-6 items-center justify-center rounded-full transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+const PILL_BUTTON_IDLE = `${PILL_BUTTON} text-muted-foreground hover:text-foreground`;
 
 function VoicePill({ session }: { session: VoiceSession }) {
   const { phase, muted, caption, agentStatus } = useVoiceState(session);
@@ -150,7 +152,9 @@ function VoicePill({ session }: { session: VoiceSession }) {
 
   if (phase === "off") return null;
   const micActive = phase === "listening" || phase === "speaking";
-  const status = phase === "error" ? "Voice error" : muted && micActive ? "Muted" : LABELS[phase];
+  // Errors are usually setup problems (no key, no connection plugin), so say
+  // what went wrong in the pill rather than only in a tooltip.
+  const status = phase === "error" ? caption || "Voice error" : muted && micActive ? "Muted" : LABELS[phase];
   const detail = [agentStatus ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
 
   return (
@@ -159,15 +163,19 @@ function VoicePill({ session }: { session: VoiceSession }) {
       data-phase={phase}
       data-muted={muted}
       className={cn(
-        "voice-mode-pill inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-border/60 bg-state-hover pl-2.5 pr-1 text-foreground",
-        phase === "speaking" && "text-sky-500",
-        phase === "error" && "text-destructive",
-        muted && micActive && "text-muted-foreground",
+        "voice-mode-pill inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-border/60 bg-state-hover pl-2.5 pr-1",
+        phase === "error"
+          ? "text-destructive"
+          : muted && micActive
+            ? "text-muted-foreground"
+            : phase === "speaking"
+              ? "text-sky-500"
+              : "text-foreground",
       )}
     >
       <span role="status" aria-live="polite" title={detail || undefined} className="inline-flex items-center gap-2 pr-1">
         {phase === "error" ? <Glyph name="alert" /> : <LevelWave session={session} phase={phase} muted={muted && micActive} />}
-        <span className="text-xs font-medium text-foreground/80">{status}</span>
+        <span className={cn("text-xs font-medium text-foreground/80", phase === "error" && "max-w-72 truncate")}>{status}</span>
       </span>
       {micActive ? (
         <button
@@ -176,7 +184,7 @@ function VoicePill({ session }: { session: VoiceSession }) {
           aria-pressed={muted}
           title={muted ? "Unmute microphone" : "Mute microphone (voice mode stays on)"}
           onClick={() => session.setMuted(!muted)}
-          className={cn(PILL_BUTTON, muted && "bg-background text-red-500 hover:text-red-500")}
+          className={muted ? `${PILL_BUTTON} bg-background text-red-500` : PILL_BUTTON_IDLE}
         >
           <Glyph name={muted ? "mic-off" : "mic"} />
         </button>
@@ -186,7 +194,7 @@ function VoicePill({ session }: { session: VoiceSession }) {
         aria-label={phase === "error" ? "Dismiss voice mode error" : "End voice mode"}
         title={phase === "error" ? caption || "Dismiss" : "End voice mode"}
         onClick={() => void (phase === "error" ? session.dismissError() : session.stop())}
-        className={PILL_BUTTON}
+        className={PILL_BUTTON_IDLE}
       >
         <Glyph name="x" />
       </button>

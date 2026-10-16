@@ -1,21 +1,17 @@
-Keep a todo list beside the work it belongs to, in the sidebar and in
-your agent threads.
+Talk to a thread's agent hands-free, the way ChatGPT and Codex voice work.
 
 ## What you get
 
-- An **Example todos** page in the left sidebar that adds, completes, and
-  removes todos.
-- A `bb voice-mode` command that does the same from a terminal.
-- Live updates, so a change made in one place reaches every open page at once.
+- **A waveform where send is** when the composer is empty. Click it to start a voice chat; type and the send arrow comes back.
+- **Full duplex with barge-in.** Talk over the voice and it stops at once; it knows how much you heard.
+- **The agent does the work.** The voice model forwards requests to the thread's agent, answers "is it done?", stops the agent when you say stop, and tells you the result when the turn ends.
+- **A live pill** in place of the mic: waveform that follows your voice and the reply, status, mute, end.
 
-## How it works
+## Setup
 
-The todos live in this plugin's own storage on the BB server, one list per
-installation. Nothing leaves the machine, and the plugin needs no account, API
-key, or external service.
+Add an OpenAI API key in the plugin settings, or install a plugin that provides realtime connections (for example a company AI proxy plugin) and leave **Connection** on auto. Pick the model and voice in settings.
 
-## For agents
+## Notes
 
-The bundled skill tells an agent to read the list with `bb voice-mode list`, add
-one todo at a time with `bb voice-mode add`, and close finished work with
-`bb voice-mode done`.
+- Mic audio, the thread title and the agent's latest message go to the realtime provider you configure, only while a session is on.
+- bb has no plugin slot for the send button or mic, so the plugin relies on bb's composer markup; a bb update can hide the waveform until the plugin is updated. bb's own send and dictation are never affected.

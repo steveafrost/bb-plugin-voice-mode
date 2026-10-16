@@ -1,141 +1,70 @@
 # bb-plugin-voice-mode
 
-A BB plugin that keeps a todo list. It shows every surface a plugin can own:
+Talk to a bb thread hands-free. When a thread's composer is empty, its send
+button becomes a waveform: click it and you are in a full-duplex voice chat.
+The voice model hands real work to the thread's agent, tells you when the
+agent is done, and stops talking the moment you talk over it.
 
-- `server.ts` — the backend: a todo store in `bb.storage.kv`, RPC methods
-  for the page, a `bb voice-mode` CLI command, a setting, and a realtime signal
-  that keeps every open page current.
-- `app.tsx` — the frontend: an **Example todos** page in the left sidebar
-  (`app.slots.navPanel`) built from the vendored components.
-- `skills/example-todos/SKILL.md` — a skill that tells agents how to keep the list
-  with `bb voice-mode`. BB imports it into agent threads automatically.
-- `PLUGIN_OVERVIEW.md` — the store listing text: a longer version of
-  `bb.description` that the plugin detail page shows under it. See
-  [Store listing](#store-listing).
+- `server.ts` — the backend. A `bb.http` WebSocket route relays browser audio
+  to an [OpenAI Realtime](https://platform.openai.com/docs/guides/realtime)
+  session and runs the voice model's tools (`send_to_agent`, `stop_agent`,
+  `get_agent_status`) against the thread with `bb.sdk`. When the agent's turn
+  settles, it hands the result back to the voice model to summarize aloud.
+- `app.tsx`, `session.ts`, `audio.ts` — the frontend. A composer action swaps
+  bb's send button for the waveform while the composer is empty, and shows a
+  pill (live waveform, status, mute, end) in place of bb's mic while a session
+  runs. Mic capture is 24 kHz PCM with echo cancellation; playback can be cut
+  instantly on barge-in.
+- `skills/voice-mode/SKILL.md` — tells the thread's agent that messages may
+  arrive by voice and that its final message is read back.
+- `test/` — backend tests against a fake host and a fake Realtime socket.
 
-Try it: install the plugin, open **Example todos** in the sidebar, then run
-`bb voice-mode add "Ship it"` in a terminal. The page updates at once.
+## Setup
 
-## UI components
+Pick one in **Settings → Plugins → Voice Mode** (or `bb plugin config voice-mode`):
 
-`components/ui/` is vendored source you own (the shadcn model): edit the
-files freely — they never update out from under you. Add more from the BB
-component registry (the full shadcn set, version-matched to your BB install
-via the pinned ref in `components.json`):
+- **OpenAI API key** — set `openaiApiKey`. Choose `model` (`gpt-realtime-2`
+  by default) and `voice`. `realtimeUrl` points at any OpenAI Realtime
+  compatible endpoint.
+- **A connection plugin** — any installed plugin that publishes a discoverable
+  `realtimeConnection` rpc returning
+  `{ protocol: "openai-realtime", url, headers, model? }`. With `connection`
+  on `auto` (the default) Voice Mode uses such a plugin when one is installed
+  and falls back to the API key. This lets a company proxy own credentials and
+  the model choice.
 
-```
-npx shadcn add @bb/select @bb/table
-```
+Keys stay on the bb server host; the browser only talks to the plugin's own
+WebSocket route.
 
-Run `npm install` once before `bb plugin build` — the vendored components'
-npm deps bundle into your dist. React, and BB-shimmed packages like the
-radix portal primitives and `sonner` (`import { toast } from "sonner"`
-reaches BB's own toaster), are provided by the BB app at runtime and never
-bundled. Every shimmed package is declared in `devDependencies` at the
-host's version so those imports typecheck; keep them there (never in
-`dependencies`, which would bundle a second copy), and `bb plugin types`
-repins declared packages alongside the SDK; unused packages may be removed. Ship `dist/` (npm tarball or committed for
-git installs) so people installing your plugin never need npm.
+## Use
 
-## Manifest
+- Empty composer in a thread → click the waveform ("Start new voice chat"), or
+  run **Toggle voice mode** from the command palette.
+- Talk normally. Ask for anything that needs the codebase and the voice model
+  sends it to the agent; ask "is it done?" any time; say "stop" to stop the
+  agent.
+- Talk over the voice to interrupt it. The mute button keeps the session open
+  without sending your mic; the × ends it.
 
-`package.json` is the plugin manifest. Notable fields:
+## Privacy
 
-- `bb.server` — backend entry (required).
-- `bb.app` — frontend entry. Delete it, `app.tsx`, `components/`,
-  `hooks/`, and `lib/` for a headless plugin.
-- `bb.skills` — skill roots; omitted here, so BB reads `skills/`. Each
-  directory with a `SKILL.md` is one skill, named after the directory.
-- `bb.name` and `bb.description` — required human-facing identity.
-- `bb.branding` — required; declare `icon` as a BB icon name or a
-  plugin-relative compact SVG, or declare `logo.light` (with optional
-  `logo.dark`). Logo assets must be relative `.svg`, `.png`, or
-  `.webp` files.
-- `engines.bb` — supported bb app version range.
-- `engines.bbPluginSdk` — the lowest plugin SDK you need (scaffold:
-  `>=0.6.49`). BB reads this as a floor, not a ceiling: a later
-  SDK in the same major still loads your plugin.
-- `dependencies` — every package your source imports that BB does not provide.
-  `bb plugin build` inlines them into `dist/`, and git installs resolve this
-  list alone, so a build-required package here rather than in
-  `devDependencies` is what keeps your plugin installable. `devDependencies`
-  is for types and tooling only (BB shims React, the portal primitives, and
-  `@get-bb/plugin-sdk` at runtime — never bundle them).
+Your microphone audio, the thread title and the agent's latest message go to
+the realtime provider you configured. Nothing is sent until you start a
+session.
 
-Run `bb plugin build` before publishing git/npm installs. It writes
-`dist/server.js` + `server.meta.json` and `app.js` / `app.css` /
-`app.meta.json`. Each `*.meta.json` stamps SDK major/version,
-`artifactFormatVersion`, `pluginId`, `pluginVersion`, and
-`builtWith` so managed installs can verify the artifacts.
+## Limits
 
-## Store listing
+- bb has no plugin slot for its send button or mic. Voice Mode finds them by
+  bb's DOM markers (`[data-promptbox-send-menu]`,
+  `button[aria-label="Start voice input"]`), so a bb update can hide the
+  waveform until the plugin catches up. bb's own send and dictation keep
+  working either way.
+- One session at a time; switching threads ends it.
 
-Two texts describe the plugin in the store. `bb.description` in package.json
-is the one-sentence hook on every browse card and the lead paragraph on the
-detail page; keep it under about 140 characters. `PLUGIN_OVERVIEW.md` is the
-same claim at length, shown in an Overview section under that paragraph.
-Rewrite the scaffold's copy for your plugin, and update it whenever
-`bb.description` changes, so the two never disagree.
+## Develop
 
-The submission to the public BB Community marketplace requires the file. Keep
-it under 4000 characters (aim for 700 to 1800) and use headings, paragraphs,
-emphasis, code, blockquotes, lists, thematic breaks, and absolute https links
-only — raw HTML, images, tables, footnotes, and task lists are rejected. Do
-not open with a `#` title or repeat `bb.description` verbatim; the page
-shows both directly above.
-
-## Install
-
-From this directory (`bb plugin new` already ran the install; a fresh clone
-needs it):
-
-```
+```sh
 npm install
-bb plugin install .
+npm run typecheck && npm test
+bb plugin build && bb plugin install . --yes
 ```
-
-After editing sources, reload:
-
-```
-bb plugin reload voice-mode
-```
-
-Or let `bb plugin dev` rebuild and reload on every save.
-
-## Configure
-
-```
-bb plugin config voice-mode
-bb plugin config voice-mode set showDone false
-bb plugin reload voice-mode
-```
-
-## Types & API reference
-
-The plugin API ships as the npm package `@get-bb/plugin-sdk`, pinned to an
-exact version in `devDependencies` (`0.6.49` — the SDK of the BB
-that scaffolded this plugin). After `npm install`, the full surface is on disk
-at:
-
-```
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts      # backend
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk-app.d.ts  # frontend
-```
-
-Your editor and `tsc` resolve `@get-bb/plugin-sdk` there through ordinary node
-resolution — no path mapping. These are readable declarations: open them for an
-exact signature.
-
-The SDK surface grows with every BB release, so the pin has to track the BB you
-actually run:
-
-```
-bb plugin types          # sync this plugin's SDK surface to the running BB
-bb plugin types --check  # CI: fail when it does not match
-```
-
-Ask BB to write plugins for you: the `bb-plugin-authoring` skill documents
-the whole surface with examples.
-
-Confused by the API, or need something the types don't explain? Clone the BB
-repo and read the source: <https://github.com/get-bb/bb>.
