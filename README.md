@@ -6,6 +6,10 @@ full-duplex voice chat.
 The voice model hands real work to the thread's agent, tells you when the
 agent is done, and stops talking the moment you talk over it.
 
+[![Voice Mode demo: start a voice chat, the agent answers, the voice reads back a summary](media/demo.gif)](https://github.com/steveafrost/bb-plugin-voice-mode/releases/download/v0.1.0/voice-mode-demo-public.mp4)
+
+[Watch the full 90-second demo with sound](https://github.com/steveafrost/bb-plugin-voice-mode/releases/download/v0.1.0/voice-mode-demo-public.mp4).
+
 - `server.ts` — the backend. A `bb.http` WebSocket route relays browser audio
   to an [OpenAI Realtime](https://platform.openai.com/docs/guides/realtime)
   session and runs the voice model's tools (`send_to_agent`, `stop_agent`,
