@@ -186,7 +186,19 @@ export default function plugin(bb: BbPluginApi) {
   async function resolveConnection(refresh = false): Promise<RealtimeConnection & { source: string }> {
     const { connection, openaiApiKey, model } = await settings.get();
     if (connection !== "openai-api-key") {
-      const fromPlugin = await pluginConnection(refresh);
+      let fromPlugin: (RealtimeConnection & { pluginId: string }) | null = null;
+      try {
+        fromPlugin = await pluginConnection(refresh);
+      } catch (error) {
+        // A connection plugin that is installed but broken (missing key,
+        // expired credential, endpoint down) must not take voice down with
+        // it when an OpenAI API key is available as a fallback.
+        const message = error instanceof Error ? error.message : String(error);
+        bb.log.warn(`voice session: connection plugin failed: ${message}`);
+        if (connection === "plugin") {
+          throw needsConfiguration(`The realtime connection plugin failed: ${message}`);
+        }
+      }
       if (fromPlugin) {
         const { pluginId, ...rest } = fromPlugin;
         return { ...rest, source: `plugin ${pluginId}` };
@@ -384,6 +396,17 @@ export default function plugin(bb: BbPluginApi) {
       speaking = null;
     }
 
+    /**
+     * Providers that normalize server events (Vercel AI Gateway realtime) keep
+     * the original OpenAI Realtime event in a `raw` field; OpenAI and
+     * OpenAI-protocol endpooints emit that event top-level. Either way this
+     * yields the OpenAI-shaped event the switch below handles.
+     */
+    function unwrapServerEvent(event: Record<string, unknown>): Record<string, unknown> {
+      const raw = event?.raw;
+      return raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : event;
+    }
+
     function onUpstreamEvent(event: Record<string, unknown>) {
       switch (event.type) {
         case "session.created":
@@ -490,7 +513,7 @@ export default function plugin(bb: BbPluginApi) {
         if (upstream !== socket) return;
         const raw = typeof event.data === "string" ? event.data : await (event.data as Blob).text();
         try {
-          onUpstreamEvent(JSON.parse(raw) as Record<string, unknown>);
+          onUpstreamEvent(unwrapServerEvent(JSON.parse(raw) as Record<string, unknown>));
         } catch (error) {
           bb.log.warn(`voice session ${threadId}: bad event: ${String(error)}`);
         }
