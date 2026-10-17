@@ -41,11 +41,26 @@ Pick one in **Settings → Plugins → Voice Mode** (or `bb plugin config voice-
   doesn't apply. This lets a company proxy own credentials and the model
   choice.
 
-`connection` decides which one: `auto` (the default) uses a connection plugin
-if one is installed and the API key only when none is. If the plugin is
-installed but fails (say it has no token), the session fails with its error;
-it doesn't quietly switch to your key. `plugin` and `openai-api-key` use only
-that one.
+`connection` decides which one:
+
+- `auto` (the default) prefers an installed connection plugin. If none is
+  available, or discovering or resolving its connection fails (for example,
+  it has no token or returns an invalid connection), Voice Mode uses your
+  configured OpenAI API key instead. Plugin resolution failures are logged
+  on the server; switching to the key does not ask for confirmation. This
+  sends audio and session context directly to OpenAI, bypassing any company
+  proxy, and uses your OpenAI API account.
+- `plugin` uses only a connection plugin. If it is missing or fails, the
+  session fails; a configured OpenAI API key is never used. Choose this mode
+  when sessions must stay on your company's connection.
+- `openai-api-key` uses only the configured OpenAI API key and ignores
+  connection plugins.
+
+Without a usable plugin connection or API key, the session fails with setup
+instructions. A plugin WebSocket handshake failure gets one connection
+refresh attempt; the same selection rules apply if that refresh fails to
+resolve a connection. Socket failures do not otherwise automatically switch
+providers.
 
 Keys stay on the bb server host; the browser only talks to the plugin's own
 WebSocket route.

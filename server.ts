@@ -124,14 +124,14 @@ export default function plugin(bb: BbPluginApi) {
       type: "select",
       label: "Connection",
       description:
-        "auto: use a plugin that provides realtime connections (such as Realtime Gateway) if one is installed, else the OpenAI API key. plugin / openai-api-key: use only that.",
+        "auto: prefer a realtime connection plugin (such as Realtime Gateway); use the OpenAI API key if none is available or connection resolution fails. plugin: never fall back to the key. openai-api-key: use only the key.",
       options: [...CONNECTIONS],
       default: "auto",
     },
     openaiApiKey: {
       type: "string",
       label: "OpenAI API key",
-      description: "Used when no plugin provides the connection; audio goes straight to OpenAI. Stored on the bb server host only.",
+      description: "Used in openai-api-key mode, or as the auto fallback when no plugin connection is available or resolution fails; audio goes straight to OpenAI. Stored on the bb server host only.",
       secret: true,
     },
     model: {
