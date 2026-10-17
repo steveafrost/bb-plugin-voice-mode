@@ -7,8 +7,9 @@
 // turn, the backend tells the voice model so it can report back aloud.
 //
 // Where the Realtime session comes from:
-// - a plugin that publishes a `realtimeConnection` rpc (e.g. Shopify AI, which
-//   routes through a company proxy), found with rpc discovery; or
+// - a plugin that publishes a `realtimeConnection` rpc (e.g. Realtime
+//   Gateway, which routes sessions through the Vercel AI Gateway), found with
+//   rpc discovery; or
 // - an OpenAI API key set in this plugin's settings, sent only to OpenAI.
 //
 // Agent output reaches the voice model, so treat it as untrusted: it never goes
@@ -123,7 +124,7 @@ export default function plugin(bb: BbPluginApi) {
       type: "select",
       label: "Connection",
       description:
-        "auto: use a plugin that provides realtime connections (such as Shopify AI) if one is installed, else the OpenAI API key. plugin / openai-api-key: use only that.",
+        "auto: use a plugin that provides realtime connections (such as Realtime Gateway) if one is installed, else the OpenAI API key. plugin / openai-api-key: use only that.",
       options: [...CONNECTIONS],
       default: "auto",
     },
