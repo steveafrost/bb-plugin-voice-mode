@@ -49,6 +49,8 @@ async function startSession(options: {
   settings?: Record<string, string>;
   connectionPlugin?: boolean;
   connectionUrl?: string;
+  connectionError?: Error;
+  refreshError?: Error;
   interactions?: unknown[];
   thread?: Record<string, unknown>;
 }) {
@@ -67,12 +69,16 @@ async function startSession(options: {
       plugins: {
         experimental_discoverRpc: async () =>
           options.connectionPlugin ? [{ pluginId: "shopify-ai", method: "realtimeConnection" }] : [],
-        callRpc: async () => ({
-          protocol: "openai-realtime",
-          url: options.connectionUrl ?? "wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini",
-          headers: { authorization: "Bearer proxy-token" },
-          model: "gpt-realtime-mini",
-        }),
+        callRpc: async ({ input }: { input: { refresh?: boolean } }) => {
+          if (options.connectionError) throw options.connectionError;
+          if (input.refresh && options.refreshError) throw options.refreshError;
+          return {
+            protocol: "openai-realtime",
+            url: options.connectionUrl ?? "wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini",
+            headers: { authorization: "Bearer proxy-token" },
+            model: "gpt-realtime-mini",
+          };
+        },
       },
     } as never,
   });
@@ -96,6 +102,50 @@ describe("connection", () => {
     expect(FakeUpstream.last!.url).toBe("wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini");
     expect(FakeUpstream.last!.init.headers).toEqual({ authorization: "Bearer proxy-token" });
     expect(harness.sdk.callsTo("plugins.callRpc")[0]?.[0]).toMatchObject({ pluginId: "shopify-ai", method: "realtimeConnection" });
+  });
+
+  it("falls back to the configured API key when plugin resolution fails in auto mode", async () => {
+    const { harness, toBrowser } = await startSession({
+      settings: { connection: "auto", openaiApiKey: "sk-test", model: "gpt-realtime" },
+      connectionPlugin: true,
+      connectionError: new Error("Missing proxy token"),
+    });
+    expect(harness.sdk.callsTo("plugins.callRpc")).toHaveLength(1);
+    expect(FakeUpstream.last!.url).toBe("wss://api.openai.com/v1/realtime?model=gpt-realtime");
+    expect(FakeUpstream.last!.init.headers).toEqual({ authorization: "Bearer sk-test" });
+    expect(toBrowser().filter((event) => event.type === "ERROR")).toEqual([]);
+  });
+
+  it("fails with setup instructions when plugin resolution fails without an API key", async () => {
+    const { toBrowser } = await startSession({
+      connectionPlugin: true,
+      connectionError: new Error("Missing proxy token"),
+    });
+    expect(FakeUpstream.last).toBeNull();
+    expect(toBrowser()[0]).toMatchObject({ type: "ERROR", message: expect.stringMatching(/OpenAI API key/) });
+  });
+
+  it.each([false, true])("never falls back to a configured API key in plugin mode (installed: %s)", async (installed) => {
+    const { toBrowser } = await startSession({
+      settings: { connection: "plugin", openaiApiKey: "sk-test" },
+      connectionPlugin: installed,
+      connectionError: new Error("Missing proxy token"),
+    });
+    expect(FakeUpstream.last).toBeNull();
+    expect(toBrowser()[0]).toMatchObject({
+      type: "ERROR",
+      message: expect.stringMatching(installed ? /Missing proxy token/ : /No realtime connection plugin/),
+    });
+  });
+
+  it("falls back to OpenAI instead of forwarding the key to an invalid plugin endpoint", async () => {
+    await startSession({
+      settings: { openaiApiKey: "sk-test" },
+      connectionPlugin: true,
+      connectionUrl: "ws://proxy.example.com/v1/realtime",
+    });
+    expect(FakeUpstream.last!.url).toBe("wss://api.openai.com/v1/realtime?model=gpt-realtime-2");
+    expect(FakeUpstream.last!.init.headers).toEqual({ authorization: "Bearer sk-test" });
   });
 
   it("ignores connection plugins when set to the API key", async () => {
@@ -336,6 +386,30 @@ describe("agent turns", () => {
       expect(upstream.ofType("conversation.item.truncate")).toHaveLength(1);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it.each(["auto", "plugin"])("handles a failed connection refresh in %s mode", async (connection) => {
+    const { harness, toBrowser } = await startSession({
+      settings: { connection, openaiApiKey: "sk-test" },
+      connectionPlugin: true,
+      refreshError: new Error("Proxy token refresh failed"),
+    });
+    const first = FakeUpstream.last!;
+    first.onerror?.();
+    await flush();
+    expect(harness.sdk.callsTo("plugins.callRpc").map((c) => (c[0] as { input: unknown }).input)).toEqual([{}, { refresh: true }]);
+    if (connection === "auto") {
+      expect(FakeUpstream.last).not.toBe(first);
+      expect(FakeUpstream.last!.url).toBe("wss://api.openai.com/v1/realtime?model=gpt-realtime-2");
+      expect(FakeUpstream.last!.init.headers).toEqual({ authorization: "Bearer sk-test" });
+      FakeUpstream.last!.onerror?.();
+      await flush();
+      expect(harness.sdk.callsTo("plugins.callRpc")).toHaveLength(2);
+      expect(toBrowser()[0]).toMatchObject({ type: "ERROR", message: "Voice connection failed" });
+    } else {
+      expect(FakeUpstream.last).toBe(first);
+      expect(toBrowser()[0]).toMatchObject({ type: "ERROR", message: expect.stringMatching(/Proxy token refresh failed/) });
     }
   });
 
