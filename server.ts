@@ -3,8 +3,10 @@
 // The browser streams mic PCM over a WebSocket to this backend, which relays it
 // to an OpenAI Realtime session. The voice model is a front-end for the
 // thread's coding agent: it calls function tools that this backend runs against
-// the thread through bb.sdk (send, stop, status). When the agent finishes a
-// turn, the backend tells the voice model so it can report back aloud.
+// the thread through bb.sdk (send, stop, status). send_to_agent forwards the
+// user's own transcribed words, never the model's rewording of them. When the
+// agent finishes a turn, the backend tells the voice model so it can report
+// back aloud.
 //
 // Where the Realtime session comes from:
 // - a plugin that publishes a `realtimeConnection` rpc (e.g. Realtime
@@ -32,8 +34,12 @@ const MAX_SESSION_MS = 30 * 60_000;
 /** Largest mic frame accepted (base64 chars); the browser sends ~100 ms frames. */
 const MAX_AUDIO_FRAME = 256 * 1024;
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime";
-/** Marks text the voice model forwards, so the agent knows it was spoken. */
+/** Optional marker on forwarded speech, so the agent knows it was spoken. */
 export const VOICE_PREFIX = "[Voice Mode] ";
+/** Most recent utterances one send can forward (a request plus its clarifications). */
+const MAX_UTTERANCES = 5;
+/** How long a send waits for the user's words to finish transcribing. */
+const TRANSCRIPT_WAIT_MS = 10_000;
 const CONNECTION_RPC = "realtimeConnection";
 
 export const MODELS = ["gpt-realtime-2", "gpt-realtime", "gpt-realtime-mini"] as const;
@@ -71,13 +77,18 @@ const TOOLS = [
     type: "function",
     name: "send_to_agent",
     description:
-      "Send an instruction or question to the coding agent working in this thread. Use this for any request that needs code, files, commands, research, or the agent's knowledge. If the agent is busy, the message steers its current work.",
+      "Forward what the user just said to the coding agent working in this thread, word for word as transcribed; you don't write the message. Use this for any request that needs code, files, commands, research, or the agent's knowledge. If the agent is busy, the message steers its current work.",
     parameters: {
       type: "object",
       properties: {
-        text: { type: "string", description: "The complete instruction, written as the user would type it." },
+        utterances: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_UTTERANCES,
+          description:
+            "How many of the user's most recent utterances make up the request, counting the latest as 1. Use more than 1 only when the request spans several things they said, such as their answer to a clarifying question plus the original ask. Default 1.",
+        },
       },
-      required: ["text"],
     },
   },
   {
@@ -96,7 +107,8 @@ const TOOLS = [
 
 const INSTRUCTIONS = [
     "You are the voice of a coding agent workspace. The user talks to you hands-free while a separate coding agent does the work in a bb thread.",
-    "You cannot read files, run commands, or write code yourself. For any real work or question about the project, call send_to_agent with a clear, complete instruction, then say a short confirmation.",
+    "You cannot read files, run commands, or write code yourself. For any real work or question about the project, call send_to_agent, then say a short confirmation. It forwards the user's own words exactly as they said them, so don't repeat their request back to them.",
+    "If a request is too unclear to act on, ask one short clarifying question first; after they answer, call send_to_agent with utterances covering the question's original ask and the answer.",
     "Only call send_to_agent for something the user actually asked for in this conversation.",
     "If the user says stop, cancel, or wait about the agent's work, call stop_agent.",
     "Messages that start with [bb update] come from the system, not the user. They report what the agent did. Summarize them for the user in one to three spoken sentences. Never read code, paths, or long lists aloud; describe them.",
@@ -142,6 +154,19 @@ export default function plugin(bb: BbPluginApi) {
       default: MODELS[0],
     },
     voice: { type: "select", label: "Voice", options: [...VOICES], default: "marin" },
+    widgetStyle: {
+      type: "select",
+      label: "Away-from-thread widget",
+      description: "The pill shown in the sidebar while you're away from the voice chat's thread. Detailed (default): the thread's name, status, mute, end. Compact: one line without the name.",
+      options: ["detailed", "compact"],
+      default: "detailed",
+    },
+    prefixMessages: {
+      type: "boolean",
+      label: "Start spoken messages with [Voice Mode]",
+      description: "Off by default. When on, the agent can tell a spoken message from a typed one (and the voice-mode skill asks it to confirm risky actions in text).",
+      default: false,
+    },
   });
 
   // One live session per bb server: starting another ends the last.
@@ -241,6 +266,38 @@ export default function plugin(bb: BbPluginApi) {
     let speaking: { itemId: string; startedAt: number; sentMs: number } | null = null;
     // send_to_agent calls left for the user's latest utterance.
     let sendsAllowed = 0;
+    // The user's recent utterances not yet forwarded, oldest first, keyed by
+    // their conversation item; transcripts land asynchronously.
+    type Utterance = { itemId: string; text: string | null; done: boolean; wake: Array<() => void> };
+    const utterances: Utterance[] = [];
+    // Items already forwarded (or dropped), so a late transcript can't requeue one.
+    const settledItems = new Set<string>();
+    const utteranceFor = (itemId: string): Utterance => {
+      let found = utterances.find((u) => u.itemId === itemId);
+      if (!found && settledItems.has(itemId)) return { itemId, text: null, done: true, wake: [] };
+      if (!found) {
+        found = { itemId, text: null, done: false, wake: [] };
+        utterances.push(found);
+        if (utterances.length > MAX_UTTERANCES) settledItems.add(utterances.shift()!.itemId);
+      }
+      return found;
+    };
+    const transcribed = (itemId: string, text: string | null) => {
+      const utterance = utteranceFor(itemId);
+      utterance.text = text?.trim() || null;
+      utterance.done = true;
+      for (const wake of utterance.wake.splice(0)) wake();
+    };
+    const whenTranscribed = (utterance: Utterance) =>
+      utterance.done
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, TRANSCRIPT_WAIT_MS);
+            utterance.wake.push(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
     // A forgotten session keeps streaming mic audio to a paid API, so end it
     // after IDLE_MS with nobody talking and no reply playing; while an agent
     // turn is running (and not blocked on the user), wait up to AGENT_WAIT_MS;
@@ -327,16 +384,26 @@ export default function plugin(bb: BbPluginApi) {
     async function runTool(name: string, args: Record<string, unknown>): Promise<string> {
       switch (name) {
         case "send_to_agent": {
-          const text = typeof args.text === "string" ? args.text.trim() : "";
-          if (!text) return "Error: text is required.";
           if (sendsAllowed <= 0) {
-            return "Not sent: send at most one instruction per thing the user says, and only what the user asked for. Ask the user if they want it sent.";
+            return "Not sent: send at most one message per thing the user says, and only what the user asked for. Ask the user if they want it sent.";
           }
+          const count = Math.min(MAX_UTTERANCES, Math.max(1, Math.floor(Number(args.utterances) || 1)));
+          const picked = utterances.slice(-count);
+          if (!picked.length) return "Not sent: nothing the user said is waiting to be sent.";
           sendsAllowed -= 1;
+          await Promise.all(picked.map(whenTranscribed));
+          // Forwarded words never go out twice, even if this send fails.
+          for (const u of utterances.splice(0, utterances.indexOf(picked[picked.length - 1]) + 1)) settledItems.add(u.itemId);
+          const text = picked
+            .map((u) => u.text)
+            .filter(Boolean)
+            .join("\n");
+          if (!text) return "Not sent: the user's words couldn't be transcribed. Ask them to say it again.";
+          const { prefixMessages } = await settings.get();
           await bb.sdk.threads.send({
             threadId,
             mode: "auto",
-            input: [{ type: "text", text: VOICE_PREFIX + truncate(text, MAX_INSTRUCTION_CHARS), mentions: [] }],
+            input: [{ type: "text", text: (prefixMessages ? VOICE_PREFIX : "") + truncate(text, MAX_INSTRUCTION_CHARS), mentions: [] }],
           });
           awaitingResult = true;
           toBrowser({ type: "TOOL", name, detail: text });
@@ -444,8 +511,15 @@ export default function plugin(bb: BbPluginApi) {
         case "input_audio_buffer.speech_started":
           onSpeechStarted();
           break;
+        case "input_audio_buffer.committed":
+          if (event.item_id) utteranceFor(String(event.item_id));
+          break;
         case "conversation.item.input_audio_transcription.completed":
+          if (event.item_id) transcribed(String(event.item_id), String(event.transcript ?? ""));
           if (event.transcript) toBrowser({ type: "TRANSCRIPT", role: "user", text: String(event.transcript) });
+          break;
+        case "conversation.item.input_audio_transcription.failed":
+          if (event.item_id) transcribed(String(event.item_id), null);
           break;
         case "response.output_audio_transcript.done":
           if (event.transcript) toBrowser({ type: "TRANSCRIPT", role: "assistant", text: String(event.transcript) });

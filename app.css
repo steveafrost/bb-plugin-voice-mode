@@ -50,3 +50,16 @@
     transition: none;
   }
 }
+
+/* Our row at the bottom of the sidebar panel body: inset like bb's footer (p-2), no shrink. */
+[data-voice-mode-sidebar-slot] {
+  flex-shrink: 0;
+  padding: 8px 8px 0;
+}
+
+/* Detailed widget: hovering the back row brightens its arrow like the icon buttons
+   (bb's stylesheet has no group-hover utilities). */
+.voice-mode-back-row:hover > span:first-child,
+.voice-mode-back-row:focus-visible > span:first-child {
+  color: var(--foreground);
+}

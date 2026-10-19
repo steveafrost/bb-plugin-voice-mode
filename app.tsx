@@ -3,13 +3,15 @@
 // the send arrow back; once the message is sent and the box is empty again, the
 // waveform returns. While live, a pill (level waveform, status, mute, end)
 // stands in for bb's mic, and the send button reappears only if you type.
+// Leave the thread (Settings, another thread) and the session keeps going in a
+// floating pill until you come back or end it.
 //
 // bb has no SDK hook on its send button, so a composer action portals our UI
 // beside it and flags the composer form so app.css can hide bb's controls.
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import { definePluginApp, useComposer } from "@get-bb/plugin-sdk/app";
-import { isLive, sessionFor, stopAllSessions, type Phase, type VoiceSession } from "./session";
+import { definePluginApp, ThreadTitle, useBbNavigate, useComposer, useSettings } from "@get-bb/plugin-sdk/app";
+import { isLive, sessionFor, stopAllSessions, subscribeAll, undockedSession, type Phase, type VoiceSession } from "./session";
 import "./app.css";
 
 const LABELS: Record<Phase, string> = {
@@ -95,8 +97,8 @@ function LevelWave({ session, phase, muted }: { session: VoiceSession; phase: Ph
   );
 }
 
-// Lucide mic / mic-off / x glyphs, inlined because bb's icon set lacks MicOff.
-function Glyph({ name }: { name: "mic" | "mic-off" | "x" | "alert" }) {
+// Lucide mic / mic-off / x / undo-2 glyphs, inlined because bb's icon set lacks MicOff.
+function Glyph({ name, className = "size-4" }: { name: "mic" | "mic-off" | "x" | "return" | "alert"; className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -106,7 +108,7 @@ function Glyph({ name }: { name: "mic" | "mic-off" | "x" | "alert" }) {
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
-      className="size-4"
+      className={className}
     >
       {name === "mic-off" ? (
         <>
@@ -128,6 +130,11 @@ function Glyph({ name }: { name: "mic" | "mic-off" | "x" | "alert" }) {
           <path d="M18 6 6 18" />
           <path d="m6 6 12 12" />
         </>
+      ) : name === "return" ? (
+        <>
+          <path d="M9 14 4 9l5-5" />
+          <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" />
+        </>
       ) : (
         <>
           <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
@@ -139,9 +146,14 @@ function Glyph({ name }: { name: "mic" | "mic-off" | "x" | "alert" }) {
   );
 }
 
-const PILL_BUTTON =
-  "inline-flex size-6 items-center justify-center rounded-full transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
-const PILL_BUTTON_IDLE = `${PILL_BUTTON} text-muted-foreground hover:text-foreground`;
+const BUTTON_BASE =
+  "inline-flex items-center justify-center rounded-full transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+const IDLE = "text-muted-foreground hover:text-foreground";
+const PILL_BUTTON = `${BUTTON_BASE} size-6`;
+const PILL_BUTTON_IDLE = `${PILL_BUTTON} ${IDLE}`;
+// The sidebar pill has more room: bigger hit targets.
+const DOCK_BUTTON = `${BUTTON_BASE} size-8`;
+const DOCK_BUTTON_IDLE = `${DOCK_BUTTON} ${IDLE}`;
 
 /** How long the pill takes to slide open from the waveform button. */
 const EXPAND_MS = 220;
@@ -169,7 +181,11 @@ function rememberExpandFrom(session: VoiceSession, button: HTMLElement, docked: 
   const left = mic?.getBoundingClientRect().width ? mic.getBoundingClientRect().left : button.getBoundingClientRect().left;
   const background = getComputedStyle(button).backgroundColor;
   expandFrom.set(session, { width: right - left, background });
-  restBox.set(session, { both: right - left, mic: mic?.getBoundingClientRect().width || REST_FALLBACK.mic, background });
+  restBox.set(session, {
+    both: right - left,
+    mic: mic?.getBoundingClientRect().width || REST_FALLBACK.mic,
+    background,
+  });
 }
 
 /**
@@ -198,9 +214,18 @@ function useSlideClosed(
     const animation = el.animate(
       [
         { ...clip, width: `${from}px` },
-        { ...clip, width: `${to}px`, borderColor: "transparent", backgroundColor: toStart ? rest.background : "transparent" },
+        {
+          ...clip,
+          width: `${to}px`,
+          borderColor: "transparent",
+          backgroundColor: toStart ? rest.background : "transparent",
+        },
       ],
-      { duration: EXPAND_MS, easing: "cubic-bezier(0.3, 0, 0.8, 0.15)", fill: "forwards" },
+      {
+        duration: EXPAND_MS,
+        easing: "cubic-bezier(0.3, 0, 0.8, 0.15)",
+        fill: "forwards",
+      },
     );
     animation.onfinish = () => done.current();
     return () => animation.cancel();
@@ -234,7 +259,16 @@ function useSlidingWidth(ref: React.RefObject<HTMLElement | null>, session: Voic
     const clip = { overflow: "hidden", justifyContent: "flex-end" };
     running.current = el.animate(
       [
-        { ...clip, width: `${from}px`, ...(opening ? { backgroundColor: opening.background, borderColor: "transparent" } : {}) },
+        {
+          ...clip,
+          width: `${from}px`,
+          ...(opening
+            ? {
+                backgroundColor: opening.background,
+                borderColor: "transparent",
+              }
+            : {}),
+        },
         { ...clip, width: `${to}px` },
       ],
       { duration: EXPAND_MS, easing: "cubic-bezier(0.2, 0, 0, 1)" },
@@ -380,7 +414,10 @@ function useSendButtonLook(ref: React.RefObject<HTMLElement | null>) {
     read();
     // Theme switches restyle the document; re-read when they do.
     const observer = new MutationObserver(read);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "style", "data-theme"],
+    });
     observer.observe(document.head, { childList: true, subtree: true });
     // Touch layouts size send differently (h-10); follow viewport changes too.
     window.addEventListener("resize", read);
@@ -503,6 +540,174 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
   );
 }
 
+/**
+ * A slot of our own at the bottom of the sidebar's panel body, just above the
+ * footer (the Settings / more menu), so the pill stays inside the panel's
+ * border, takes space from the thread list, and the footer doesn't move. Found
+ * by bb's `data-testid="app-sidebar-body"` marker (the flex column inside the
+ * nav-rail panel, so the icon rail beside it is left alone); null when the
+ * sidebar is collapsed or the marker is gone. bb has no plugin slot here.
+ */
+function useSidebarSlot(enabled: boolean): HTMLElement | null {
+  const [slot, setSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let frame = 0;
+    let current: HTMLElement | null = null;
+    const place = () => {
+      frame = 0;
+      const body =
+        Array.from(document.querySelectorAll<HTMLElement>('[data-testid="app-sidebar-body"]')).find(
+          (el) => !el.hidden && el.getBoundingClientRect().width > 80,
+        ) ?? null;
+      // React may append its own children after ours; keep ours last.
+      if (current && body && current.parentElement === body && body.lastElementChild === current) return;
+      if (current && body && current.parentElement === body) {
+        body.appendChild(current);
+        return;
+      }
+      current?.remove();
+      current = null;
+      if (body) {
+        current = document.createElement("div");
+        current.setAttribute("data-voice-mode-sidebar-slot", "");
+        body.appendChild(current);
+      }
+      setSlot(current);
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(place);
+    };
+    place();
+    // Sidebar collapse, mobile drawer, remounts: re-place on DOM and size changes.
+    const observer = new MutationObserver(schedule);
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-state", "data-collapsible", "style", "hidden"],
+    });
+    window.addEventListener("resize", schedule);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", schedule);
+      cancelAnimationFrame(frame);
+      current?.remove();
+      setSlot(null);
+    };
+  }, [enabled]);
+  return slot;
+}
+
+/**
+ * App-wide: while a session is live and its thread's composer isn't on screen
+ * (you opened Settings or another thread), show a pill at the bottom of the
+ * sidebar, above its footer, so you can still see, mute, end, or jump back to
+ * the conversation. With the sidebar hidden it floats at the bottom-left.
+ */
+function FloatingVoice() {
+  const session = useSyncExternalStore(subscribeAll, undockedSession);
+  const slot = useSidebarSlot(session !== null);
+  if (!session) return null;
+  if (!slot) return <FloatingPill session={session} placement="floating" />;
+  return createPortal(<FloatingPill session={session} placement="sidebar" />, slot);
+}
+
+function FloatingPill({ session, placement }: { session: VoiceSession; placement: "sidebar" | "floating" }) {
+  const { phase, muted, caption, agentStatus } = useVoiceState(session);
+  const navigate = useBbNavigate();
+  // Detailed unless the user picked compact (also while settings are loading, so it doesn't flip).
+  const detailed = useSettings().values?.widgetStyle !== "compact";
+  const micActive = phase === "listening" || phase === "speaking";
+  const status = muted && micActive ? "Muted" : LABELS[phase];
+  const detail = [agentStatus ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
+  const statusRow = (
+    <span role="status" aria-live="polite" className="inline-flex min-w-0 items-center gap-2">
+      <LevelWave session={session} phase={phase} muted={muted && micActive} />
+      <span className="truncate text-xs font-medium text-foreground/80">{status}</span>
+    </span>
+  );
+  const backButton = (
+    <button
+      type="button"
+      aria-label="Back to the voice chat's thread"
+      title="Back to the voice chat's thread"
+      onClick={() => navigate.toThread(session.threadId)}
+      className={cn(DOCK_BUTTON_IDLE, "shrink-0")}
+    >
+      <Glyph name="return" className="size-5" />
+    </button>
+  );
+  const controls = (
+    <>
+      <div title={detail || undefined} className={cn("inline-flex min-w-0 flex-1 items-center pr-2", detailed && "pl-2")}>
+        {statusRow}
+      </div>
+      {micActive ? (
+        <button
+          type="button"
+          aria-label={muted ? "Unmute microphone" : "Mute microphone"}
+          aria-pressed={muted}
+          title={muted ? "Unmute microphone" : "Mute microphone (voice mode stays on)"}
+          onClick={() => session.setMuted(!muted)}
+          className={muted ? `${DOCK_BUTTON} bg-state-hover text-red-500` : DOCK_BUTTON_IDLE}
+        >
+          <Glyph name={muted ? "mic-off" : "mic"} className="size-5" />
+        </button>
+      ) : null}
+      <button
+        type="button"
+        aria-label="End voice mode"
+        title="End voice mode"
+        onClick={() => void session.stop()}
+        className={DOCK_BUTTON_IDLE}
+      >
+        {/* Lucide's x fills only the middle half of its box; 24px matches the 20px mic optically. */}
+        <Glyph name="x" className="size-6" />
+      </button>
+    </>
+  );
+  return (
+    <div
+      data-voice-mode-floating=""
+      data-phase={phase}
+      data-style={detailed ? "detailed" : "compact"}
+      className={cn(
+        "voice-mode-floating border border-border/60 bg-background",
+        detailed ? "flex flex-col rounded-xl p-1" : "inline-flex h-10 items-center gap-1 rounded-full px-1",
+        placement === "sidebar" ? "w-full" : "fixed bottom-4 left-4 z-50 max-w-72 shadow-lg",
+        muted && micActive ? "text-muted-foreground" : phase === "speaking" ? "text-sky-500" : "text-foreground",
+      )}
+    >
+      {detailed ? (
+        <>
+          {/* Back + the thread's name as one button: hover or click anywhere on the row. */}
+          <button
+            type="button"
+            aria-label="Back to the voice chat's thread"
+            title="Back to the voice chat's thread"
+            onClick={() => navigate.toThread(session.threadId)}
+            className="voice-mode-back-row flex w-full min-w-0 items-center gap-1 rounded-lg pr-2 text-left transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <span className="inline-flex size-8 shrink-0 items-center justify-center text-muted-foreground">
+              <Glyph name="return" className="size-5" />
+            </span>
+            <span className="line-clamp-2 min-w-0 flex-1 break-words text-xs font-medium leading-snug text-foreground">
+              <ThreadTitle threadId={session.threadId} />
+            </span>
+          </button>
+          <div className="flex w-full min-w-0 items-center gap-1">{controls}</div>
+        </>
+      ) : (
+        <>
+          {backButton}
+          {controls}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
   app.composer.customize({
     id: "voice-mode",
@@ -520,6 +725,11 @@ export default definePluginApp((app) => {
       const session = sessionFor(composer.scope.threadId);
       void (isLive(session.state.phase) ? session.stop() : session.start());
     },
+  });
+
+  app.slots.experimental_appOverlay({
+    id: "voice-mode-floating",
+    component: FloatingVoice,
   });
 
   app.contentScripts.register({

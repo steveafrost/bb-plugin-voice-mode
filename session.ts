@@ -1,12 +1,11 @@
-// One voice session per thread, held outside React so the composer pill and
-// the mic's hold gesture share it and it survives composer re-renders. Only one
-// session runs at a time: starting a second ends the first.
+// One voice session per thread, held outside React so it outlives the composer:
+// navigating away (Settings, another thread) keeps it talking, and the app
+// overlay shows a floating pill until you're back. Only one session runs at a
+// time: starting a second ends the first.
 import type { BrowserToServer, ServerToBrowser } from "./server";
 import { BARGE_IN_CHUNKS, BARGE_IN_RMS, Player, startMic } from "./audio";
 
 const PLUGIN_ID = "voice-mode";
-/** Composer remounts (layout switch, pane moves) shouldn't end a live session. */
-const UNMOUNT_GRACE_MS = 1500;
 
 export type Phase = "off" | "connecting" | "listening" | "speaking" | "error";
 
@@ -35,7 +34,6 @@ export class VoiceSession {
   private player: Player | null = null;
   private micLevel = 0;
   private mounts = 0;
-  private graceTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(readonly threadId: string) {}
 
@@ -49,6 +47,12 @@ export class VoiceSession {
   private set(patch: Partial<VoiceState>) {
     this.state = { ...this.state, ...patch };
     for (const listener of this.listeners) listener();
+    notifyAll();
+  }
+
+  /** Whether a composer for this thread is on screen to host the pill. */
+  get docked() {
+    return this.mounts > 0;
   }
 
   /** Audible level, 0..1: the model's voice while speaking, else the mic. */
@@ -61,16 +65,17 @@ export class VoiceSession {
     this.set({ muted });
   }
 
-  /** Called by each mounted composer; the last unmount ends the session. */
+  /**
+   * Called by each mounted composer for this thread. Unmounting never ends the
+   * session (only the end button, the shortcut, the backend's idle limit, or
+   * closing the window do); it hands the pill to the app overlay.
+   */
   retain() {
     this.mounts++;
-    clearTimeout(this.graceTimer);
+    notifyAll();
     return () => {
       this.mounts--;
-      if (this.mounts > 0) return;
-      this.graceTimer = setTimeout(() => {
-        if (this.mounts === 0) void this.stop();
-      }, UNMOUNT_GRACE_MS);
+      notifyAll();
     };
   }
 
@@ -182,6 +187,24 @@ export class VoiceSession {
 }
 
 const sessions = new Map<string, VoiceSession>();
+
+// App-wide change feed for the overlay: any session's state or mounts changed.
+const allListeners = new Set<() => void>();
+function notifyAll() {
+  for (const listener of allListeners) listener();
+}
+export function subscribeAll(listener: () => void) {
+  allListeners.add(listener);
+  return () => void allListeners.delete(listener);
+}
+
+/** The session to show in the floating pill: live, but no composer of its thread on screen. */
+export function undockedSession(): VoiceSession | null {
+  for (const session of sessions.values()) {
+    if (isLive(session.state.phase) && !session.docked) return session;
+  }
+  return null;
+}
 
 export function sessionFor(threadId: string): VoiceSession {
   let session = sessions.get(threadId);

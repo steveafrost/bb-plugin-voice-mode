@@ -45,8 +45,17 @@ afterEach(() => vi.unstubAllGlobals());
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** The user says something: speech starts, the audio is committed, and (unless `transcript` is null) transcribed. */
+function say(upstream: FakeUpstream, itemId: string, transcript: string | null = "go") {
+  upstream.emit({ type: "input_audio_buffer.speech_started" });
+  upstream.emit({ type: "input_audio_buffer.committed", item_id: itemId });
+  if (transcript !== null) {
+    upstream.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: itemId, transcript });
+  }
+}
+
 async function startSession(options: {
-  settings?: Record<string, string>;
+  settings?: Record<string, string | boolean>;
   connectionPlugin?: boolean;
   connectionUrl?: string;
   connectionError?: Error;
@@ -172,8 +181,8 @@ describe("connection", () => {
 });
 
 describe("session", () => {
-  async function liveSession() {
-    const session = await startSession({ settings: { openaiApiKey: "sk-test", voice: "cedar" } });
+  async function liveSession(settings: Record<string, string | boolean> = {}) {
+    const session = await startSession({ settings: { openaiApiKey: "sk-test", voice: "cedar", ...settings } });
     const upstream = FakeUpstream.last!;
     upstream.open();
     upstream.emit({ type: "session.updated" });
@@ -203,22 +212,23 @@ describe("session", () => {
     expect(upstream.ofType("input_audio_buffer.append")).toEqual([{ type: "input_audio_buffer.append", audio: "AAAA" }]);
   });
 
-  it("runs send_to_agent against the thread and asks for a reply after the response ends", async () => {
+  it("forwards what the user said, verbatim, and asks for a reply after the response ends", async () => {
     const { harness, upstream } = await liveSession();
-    upstream.emit({ type: "input_audio_buffer.speech_started" });
+    say(upstream, "u1", "um, can you run the tests");
     upstream.emit({ type: "response.created" });
     upstream.emit({
       type: "response.function_call_arguments.done",
       call_id: "call_1",
       name: "send_to_agent",
-      arguments: JSON.stringify({ text: "Run the tests" }),
+      // An old-style rewrite from the model is ignored.
+      arguments: JSON.stringify({ text: "Run the test suite" }),
     });
     upstream.emit({ type: "response.done" });
     await flush();
     await flush();
     expect(harness.sdk.callsTo("threads.send")[0]?.[0]).toMatchObject({
       threadId: THREAD,
-      input: [{ type: "text", text: "[Voice Mode] Run the tests" }],
+      input: [{ type: "text", text: "um, can you run the tests" }],
     });
     expect(upstream.ofType("conversation.item.create")[1]).toMatchObject({
       item: { type: "function_call_output", call_id: "call_1" },
@@ -227,12 +237,62 @@ describe("session", () => {
     expect(upstream.ofType("response.create")).toEqual([{ type: "response.create", response: { tool_choice: "none" } }]);
   });
 
+  it("marks spoken messages with [Voice Mode] only when the setting is on", async () => {
+    const { harness, upstream } = await liveSession({ prefixMessages: true });
+    say(upstream, "u1", "Run the tests");
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "c", name: "send_to_agent", arguments: "{}" });
+    await flush();
+    await flush();
+    expect(harness.sdk.callsTo("threads.send")[0]?.[0]).toMatchObject({
+      input: [{ type: "text", text: "[Voice Mode] Run the tests" }],
+    });
+  });
+
+  it("waits for a transcript that lands after the tool call", async () => {
+    const { harness, upstream } = await liveSession();
+    say(upstream, "u1", null);
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "c", name: "send_to_agent", arguments: "{}" });
+    await flush();
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(0);
+    upstream.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: "u1", transcript: "fix the lint" });
+    await flush();
+    await flush();
+    expect(harness.sdk.callsTo("threads.send")[0]?.[0]).toMatchObject({ input: [{ text: "fix the lint" }] });
+  });
+
+  it("joins a clarifying answer with the original ask, and never forwards words twice", async () => {
+    const { harness, upstream } = await liveSession();
+    say(upstream, "u1", "run the tests");
+    say(upstream, "u2", "just the unit ones");
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "c1", name: "send_to_agent", arguments: '{"utterances":2}' });
+    await flush();
+    await flush();
+    say(upstream, "u3", "and then lint");
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "c2", name: "send_to_agent", arguments: '{"utterances":3}' });
+    await flush();
+    await flush();
+    const texts = harness.sdk.callsTo("threads.send").map((c) => (c[0] as { input: { text: string }[] }).input[0]!.text);
+    expect(texts).toEqual(["run the tests\njust the unit ones", "and then lint"]);
+  });
+
+  it("asks the user to repeat when their words couldn't be transcribed", async () => {
+    const { harness, upstream } = await liveSession();
+    say(upstream, "u1", null);
+    upstream.emit({ type: "conversation.item.input_audio_transcription.failed", item_id: "u1" });
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "c", name: "send_to_agent", arguments: "{}" });
+    await flush();
+    await flush();
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(0);
+    const output = (upstream.ofType("conversation.item.create").at(-1) as { item: { output: string } }).item.output;
+    expect(output).toMatch(/couldn't be transcribed/);
+  });
+
   it("allows one send_to_agent per thing the user says", async () => {
     const { harness, upstream } = await liveSession();
     const call = (id: string) =>
-      upstream.emit({ type: "response.function_call_arguments.done", call_id: id, name: "send_to_agent", arguments: '{"text":"go"}' });
+      upstream.emit({ type: "response.function_call_arguments.done", call_id: id, name: "send_to_agent", arguments: "{}" });
     call("unprompted");
-    upstream.emit({ type: "input_audio_buffer.speech_started" });
+    say(upstream, "u1");
     call("first");
     call("second");
     await flush();
@@ -262,9 +322,9 @@ describe("session", () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
     try {
       const { upstream, toBrowser } = await liveSession();
-      upstream.emit({ type: "input_audio_buffer.speech_started" });
+      say(upstream, "u1");
       upstream.emit({ type: "response.created" });
-      upstream.emit({ type: "response.function_call_arguments.done", call_id: "c", name: "send_to_agent", arguments: '{"text":"go"}' });
+      upstream.emit({ type: "response.function_call_arguments.done", call_id: "c", name: "send_to_agent", arguments: "{}" });
       upstream.emit({ type: "response.done" });
       await vi.advanceTimersByTimeAsync(0);
       upstream.emit({ type: "response.done" }); // the spoken follow-up

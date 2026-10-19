@@ -21,9 +21,9 @@ agent is done, and stops talking the moment you talk over it.
   pill (live waveform, status, mute, end) in place of bb's mic while a session
   runs. Mic capture is 24 kHz PCM with echo cancellation; playback can be cut
   instantly on barge-in.
-- `skills/voice-mode/SKILL.md` — tells the thread's agent that messages
-  starting with `[Voice Mode]` were spoken and relayed, and that its final
-  message is read back.
+- `skills/voice-mode/SKILL.md` — tells the thread's agent how voice messages
+  arrive (the user's own transcribed words, optionally marked `[Voice Mode]`)
+  and that its final message is read back.
 - `test/` — backend tests against a fake host and a fake Realtime socket.
 
 ## Setup
@@ -78,6 +78,11 @@ WebSocket route.
   permission), the voice tells you to answer it in bb.
 - Talk over the voice to interrupt it. The mute button keeps the session open
   without sending your mic; the × ends it.
+- Leave the thread (Settings, another thread) and the conversation keeps
+  going in a pill at the bottom of the sidebar, above its footer (bottom-left
+  of the window when the sidebar is collapsed): mute, end, or ↩ back to the
+  thread from there. `widgetStyle` picks `detailed` (with the thread's name,
+  the default) or `compact` (one line, no name).
 
 ## Privacy
 
@@ -89,8 +94,11 @@ characters of each). Nothing is sent until you start a session.
 Agent replies can quote text from anywhere (issues, web pages, files), so
 Voice Mode treats them as data: they never go in the voice model's
 instructions, replies to them can't call tools, and the voice model can
-forward at most one instruction to the agent per thing you say. Forwarded
-messages start with `[Voice Mode]` so you and the agent can tell them apart.
+forward at most one message to the agent per thing you say. That message is
+your own words as transcribed, not the voice model's rewording, so the agent
+sees what you actually said (filler and mishearings included). Turn on
+`prefixMessages` to start spoken messages with `[Voice Mode]` so the agent can
+tell them from typed ones; it's off by default.
 
 ## Limits
 
@@ -100,7 +108,8 @@ messages start with `[Voice Mode]` so you and the agent can tell them apart.
   If a bb update changes them, the waveform and pill fall back to the
   composer's plugin action slot beside bb's own buttons: less Codex-like, but
   still there. bb's own send and dictation keep working either way.
-- One session at a time per bb server; switching threads ends it.
+- One session at a time per bb server; starting one in another thread ends
+  the first.
 - A session ends itself after 5 minutes with no speech and no reply playing
   (20 minutes while an agent turn is running), and after 30 minutes in any
   case, so a forgotten session doesn't keep streaming.
