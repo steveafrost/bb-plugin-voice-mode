@@ -94,9 +94,11 @@ characters of each). Nothing is sent until you start a session.
 Agent replies can quote text from anywhere (issues, web pages, files), so
 Voice Mode treats them as data: they never go in the voice model's
 instructions, replies to them can't call tools, and the voice model can
-forward at most one message to the agent per thing you say. That message is
-your own words as transcribed, not the voice model's rewording, so the agent
-sees what you actually said (filler and mishearings included). Turn on
+forward at most one message to the agent per thing you say. By default that
+message is your own words as transcribed, not the voice model's rewording, so
+the agent sees what you actually said (filler and mishearings included). Set
+`messageText` to `rewritten` to have the voice model write a clean instruction
+instead; it reads better but can drift from what you said. Turn on
 `prefixMessages` to start spoken messages with `[Voice Mode]` so the agent can
 tell them from typed ones; it's off by default.
 

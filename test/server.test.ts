@@ -248,6 +248,21 @@ describe("session", () => {
     });
   });
 
+  it("sends the voice model's own instruction when messageText is rewritten", async () => {
+    const { harness, upstream } = await liveSession({ messageText: "rewritten" });
+    const [update] = upstream.ofType("session.update") as { session: Record<string, any> }[];
+    const send = update!.session.tools.find((t: { name: string }) => t.name === "send_to_agent");
+    expect(send.parameters.required).toEqual(["text"]);
+    say(upstream, "u1", "um, can you like run the tests");
+    const call = (id: string) =>
+      upstream.emit({ type: "response.function_call_arguments.done", call_id: id, name: "send_to_agent", arguments: '{"text":"Run the tests."}' });
+    call("first");
+    call("second");
+    await flush();
+    await flush();
+    expect(harness.sdk.callsTo("threads.send").map((c) => (c[0] as { input: { text: string }[] }).input[0]!.text)).toEqual(["Run the tests."]);
+  });
+
   it("waits for a transcript that lands after the tool call", async () => {
     const { harness, upstream } = await liveSession();
     say(upstream, "u1", null);
