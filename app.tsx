@@ -6,11 +6,21 @@
 // Leave the thread (Settings, another thread) and the session keeps going in a
 // floating pill until you come back or end it.
 //
-// bb has no SDK hook on its send button, so a composer action portals our UI
-// beside it and flags the composer form so app.css can hide bb's controls.
+// bb has no SDK hook on its send button, so we portal our UI over it and flag
+// the composer form so app.css can hide bb's controls. On wide screens a
+// composer action places the portal; bb doesn't mount plugin actions in its
+// compact (phone / collapsed) composer, so there the app overlay hosts the same
+// UI and pairs each host with a form by position.
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import { definePluginApp, ThreadTitle, useBbNavigate, useComposer, useSettings } from "@get-bb/plugin-sdk/app";
+import {
+  definePluginApp,
+  ThreadTitle,
+  useBbNavigate,
+  useComposer,
+  useComposers,
+  useSettings,
+} from "@get-bb/plugin-sdk/app";
 import { isLive, sessionFor, stopAllSessions, subscribeAll, undockedSession, type Phase, type VoiceSession } from "./session";
 import "./app.css";
 
@@ -26,6 +36,8 @@ const ERROR_DISMISS_MS = 6000;
 const cn = (...classes: (string | false | null | undefined)[]) => classes.filter(Boolean).join(" ");
 
 const SEND_SELECTOR = "[data-promptbox-send-menu]";
+/** The row our control portals into; present in both the wide and compact composer. */
+const SUBMIT_GROUP_SELECTOR = "[data-promptbox-submit-group]";
 /** How long to wait for bb's send group before falling back to the action slot. */
 const FALLBACK_AFTER_MS = 1500;
 /** Set on the composer form while the waveform button replaces bb's send button. */
@@ -363,7 +375,47 @@ function VoicePill({
 function ComposerVoice() {
   const composer = useComposer();
   const threadId = composer.scope.kind === "thread" ? composer.scope.threadId : null;
-  return threadId ? <ThreadComposerVoice threadId={threadId} canStart={composer.isEmpty && !composer.isRunning} /> : null;
+  // bb renders no plugin composer actions in its compact composer, so nothing
+  // here mounts there; CompactVoiceButtons hosts it from the app overlay.
+  if (!threadId || composer.layout === "compact") return null;
+  return <ThreadComposerVoice threadId={threadId} canStart={composer.isEmpty && !composer.isRunning} />;
+}
+
+/**
+ * The composers on screen that bb is drawing compact: collapsed or phone
+ * width, the case where its action row leaves our composer action out.
+ */
+function compactComposerForms(): HTMLFormElement[] {
+  return Array.from(document.querySelectorAll<HTMLFormElement>("form[data-promptbox][data-promptbox-compact]"));
+}
+
+/**
+ * The app overlay's stand-in for the composer action, for the thread composers
+ * bb is drawing compact. Their plugin action slots exist but never render, so
+ * this is the only way in. Each host pairs with a form by position; when the
+ * counts disagree (a composer in the way that we don't host) it renders
+ * nothing, leaving bb's own controls untouched rather than guessing.
+ */
+function CompactVoiceButtons() {
+  const composers = useComposers().filter(
+    (composer) => composer.scope.kind === "thread" && composer.layout === "compact",
+  );
+  if (!composers.length || compactComposerForms().length !== composers.length) return null;
+  return (
+    <>
+      {composers.map((composer, index) =>
+        composer.scope.kind === "thread" ? (
+          <ThreadComposerVoice
+            key={composer.key}
+            threadId={composer.scope.threadId}
+            canStart={composer.isEmpty && !composer.isRunning}
+            compactIndex={index}
+            compactCount={composers.length}
+          />
+        ) : null,
+      )}
+    </>
+  );
 }
 
 /**
@@ -376,22 +428,30 @@ function useSendButtonLook(ref: React.RefObject<HTMLElement | null>) {
     const form = ref.current?.closest("form");
     if (!form) return;
     const read = () => {
+      // The compact composer has no send menu: bb sends from a plain button in
+      // the submit group, so copy that one's size and colors instead.
       const menu = form.querySelector<HTMLElement>(SEND_SELECTOR);
-      if (!menu) return;
-      // The menu is display:none while we stand in for it, and bb collapses its
-      // model chevron (w-0) while the composer is empty, growing it (w-6) as you
-      // type. Un-hide and expand it for one synchronous layout read (no paint in
-      // between) so the waveform takes the size send has once you type.
-      const hider = menu.closest<HTMLElement>(`[${VOICE_SEND_ATTR}]`);
+      const target =
+        menu ??
+        form.querySelector<HTMLElement>(`${SUBMIT_GROUP_SELECTOR} [data-promptbox-submit-action]`) ??
+        form.querySelector<HTMLElement>(SUBMIT_GROUP_SELECTOR);
+      if (!target) return;
+      // The control is display:none while we stand in for it, and bb collapses
+      // its model chevron (w-0) while the composer is empty, growing it (w-6) as
+      // you type. Un-hide and expand it for one synchronous layout read (no
+      // paint in between) so the waveform takes the size send has once you type.
+      const hider = target.closest<HTMLElement>(`[${VOICE_SEND_ATTR}]`);
       hider?.removeAttribute(VOICE_SEND_ATTR);
-      const chevron = Array.from(menu.children).find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains("w-0"));
+      const chevron = menu
+        ? Array.from(menu.children).find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains("w-0"))
+        : undefined;
       const transition = chevron?.style.transition ?? "";
       if (chevron) {
         chevron.style.transition = "none";
         chevron.classList.replace("w-0", "w-6");
       }
-      const rect = menu.getBoundingClientRect();
-      const m = getComputedStyle(menu);
+      const rect = target.getBoundingClientRect();
+      const m = getComputedStyle(target);
       const next: React.CSSProperties = {
         // The whole send control (arrow plus model chevron), so swapping
         // between it and the waveform doesn't change the button's size.
@@ -455,7 +515,19 @@ function StartVoiceButton({ session, docked }: { session: VoiceSession; docked: 
   );
 }
 
-function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStart: boolean }) {
+function ThreadComposerVoice({
+  threadId,
+  canStart,
+  compactIndex,
+  compactCount,
+}: {
+  threadId: string;
+  canStart: boolean;
+  /** Set when the app overlay (not the composer action row) hosts this. */
+  compactIndex?: number;
+  compactCount?: number;
+}) {
+  const inOverlay = compactIndex !== undefined && compactCount !== undefined;
   const session = sessionFor(threadId);
   const { phase } = useVoiceState(session);
   const anchor = useRef<HTMLSpanElement>(null);
@@ -463,16 +535,16 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
   // bb's send group usually renders within a frame or two of this action. If
   // it hasn't after a beat, bb's markup has changed: fall back to rendering in
   // the composer action slot the SDK gave us, beside bb's own controls, and
-  // leave send and the mic alone.
+  // leave send and the mic alone. An overlay host has no slot to fall back to.
   const [undocked, setUndocked] = useState(false);
   useEffect(() => {
-    if (host) {
+    if (host || inOverlay) {
       setUndocked(false);
       return;
     }
     const timer = setTimeout(() => setUndocked(true), FALLBACK_AFTER_MS);
     return () => clearTimeout(timer);
-  }, [host]);
+  }, [host, inOverlay]);
 
   // When a live session ends (end button, idle end, the socket closing), keep
   // the pill up while it slides closed. Derived during render so the mic and
@@ -490,33 +562,57 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
   useEffect(() => {
     const start = anchor.current;
     if (!start) return;
-    // bb's buttons can render after this action does, so key off the composer
-    // form and look them up on every change.
-    const composerRoot = start.closest("form");
-    if (!composerRoot) return;
     const portal = document.createElement("span");
     portal.className = "voice-mode-host";
     let frame = 0;
+    let composerRoot: HTMLElement | null = null;
+    let observer: MutationObserver | null = null;
     const place = () => {
       frame = 0;
-      const group = composerRoot.querySelector(SEND_SELECTOR)?.closest("[data-promptbox-submit-group]");
+      // bb's buttons can render after this action does, so key off the composer
+      // form and look them up on every change.
+      const group =
+        composerRoot?.querySelector(SEND_SELECTOR)?.closest(SUBMIT_GROUP_SELECTOR) ??
+        composerRoot?.querySelector(SUBMIT_GROUP_SELECTOR) ??
+        null;
       if (group && portal.nextSibling !== group) group.before(portal);
       setHost(portal.isConnected ? portal : null);
     };
-    place();
-    const observer = new MutationObserver(() => {
+    const schedule = () => {
       if (!frame) frame = requestAnimationFrame(place);
-    });
-    observer.observe(composerRoot, { childList: true, subtree: true });
+    };
+    // Inside the composer action slot the form is our ancestor. In the app
+    // overlay there is none, so take the paired compact form and keep looking
+    // until it exists: the thread and its composer can arrive after we mount.
+    const watch = () => {
+      const forms = compactCount === undefined ? null : compactComposerForms();
+      const paired =
+        compactIndex === undefined || !forms || forms.length !== compactCount ? null : (forms[compactIndex] ?? null);
+      composerRoot = start.closest("form") ?? paired;
+      if (!composerRoot) return false;
+      observer?.disconnect();
+      observer = new MutationObserver(schedule);
+      observer.observe(composerRoot, { childList: true, subtree: true });
+      place();
+      return true;
+    };
+    const bodyObserver = watch()
+      ? null
+      : new MutationObserver(() => {
+          if (!watch()) return;
+          bodyObserver?.disconnect();
+        });
+    bodyObserver?.observe(document.body, { childList: true, subtree: true });
     return () => {
-      observer.disconnect();
+      bodyObserver?.disconnect();
+      observer?.disconnect();
       cancelAnimationFrame(frame);
       portal.remove();
-      composerRoot.removeAttribute(VOICE_SEND_ATTR);
-      composerRoot.removeAttribute(LIVE_ATTR);
+      composerRoot?.removeAttribute(VOICE_SEND_ATTR);
+      composerRoot?.removeAttribute(LIVE_ATTR);
       setHost(null);
     };
-  }, [threadId]);
+  }, [threadId, compactIndex, compactCount]);
 
   // Empty and idle: our waveform stands in for bb's send button. Live: the
   // pill stands in for bb's mic (and for send, until you type).
@@ -529,13 +625,18 @@ function ThreadComposerVoice({ threadId, canStart }: { threadId: string; canStar
     root.toggleAttribute(LIVE_ATTR, showing);
   }, [host, hideSend, showing]);
 
-  const content = showStart ? <StartVoiceButton session={session} docked={!!host} /> : (
+  const content = showStart ? (
+    <StartVoiceButton session={session} docked={!!host} />
+  ) : (
     <VoicePill session={session} closing={closing} toStart={canStart && !!host} onClosed={() => setClosing(false)} />
   );
+  // Without a composer slot to sit in, only a live session is worth showing
+  // (mute, end, back to the thread).
+  const inline = undocked || isLive(phase) || phase === "error" || closing;
   return (
     <>
       <span ref={anchor} hidden />
-      {host ? createPortal(content, host) : undocked || isLive(phase) || phase === "error" || closing ? content : null}
+      {host ? createPortal(content, host) : inline ? content : null}
     </>
   );
 }
@@ -730,6 +831,13 @@ export default definePluginApp((app) => {
   app.slots.experimental_appOverlay({
     id: "voice-mode-floating",
     component: FloatingVoice,
+  });
+
+  // bb's compact composer renders no plugin action slot, so the start control
+  // needs a host that is always mounted (see CompactVoiceButtons).
+  app.slots.experimental_appOverlay({
+    id: "voice-mode-compact",
+    component: CompactVoiceButtons,
   });
 
   app.contentScripts.register({
