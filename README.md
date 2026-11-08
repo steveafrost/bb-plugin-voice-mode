@@ -56,6 +56,34 @@ Pick one in **Settings → Plugins → Voice Mode** (or `bb plugin config voice-
 - `openai-api-key` uses only the configured OpenAI API key and ignores
   connection plugins.
 
+### Subscriptions and ChatGPT sign-in
+
+Voice Mode has no subscription sign-in of its own. It talks to the OpenAI
+Realtime API with an OpenAI API key, or with whatever credential a connection
+plugin returns.
+
+A community plugin covers the subscription case: `ChatGPT Realtime
+Connection` (`codex-realtime`) by gpambrozio hands Voice Mode the ChatGPT
+token `codex login` already stores on disk:
+
+```bash
+bb plugin install 'git:github.com/gpambrozio/bb-plugins@>=0.1.0' --plugin codex-realtime --tag-prefix codex-realtime/
+```
+
+The plugin's own documentation is at
+https://github.com/gpambrozio/bb-plugins/tree/main/codex-realtime
+
+It is a community plugin, not maintained here. Sending that token to the
+Realtime API is undocumented by OpenAI, and OpenAI already refuses it for at
+least one voice model (`gpt-live-1`), so it can stop working without notice.
+Whether the ChatGPT or Codex terms permit another program to reuse the Codex
+sign-in this way is not something this project has verified. Voice chats
+started this way count against that ChatGPT plan.
+
+To see which path a session used, check the source Voice Mode logs
+(`bb plugin logs voice-mode`). Setting `connection` to `plugin` makes a
+failing plugin's reason appear on screen instead of falling back to the key.
+
 Without a usable plugin connection or API key, the session fails with setup
 instructions. A plugin WebSocket handshake failure gets one connection
 refresh attempt; the same selection rules apply if that refresh fails to
