@@ -10,9 +10,8 @@
 // back aloud.
 //
 // Where the Realtime session comes from:
-// - a plugin that publishes a `realtimeConnection` rpc (e.g. Realtime
-//   Gateway, which routes sessions through the Vercel AI Gateway), found with
-//   rpc discovery; or
+// - a plugin that publishes a `realtimeConnection` rpc (e.g. a company
+//   realtime proxy or an AI gateway), found with rpc discovery; or
 // - an OpenAI API key set in this plugin's settings, sent only to OpenAI.
 //
 // Agent output reaches the voice model, so treat it as untrusted: it never goes
@@ -166,7 +165,7 @@ export default function plugin(bb: BbPluginApi) {
       type: "select",
       label: "Connection",
       description:
-        "auto: prefer a realtime connection plugin (such as Realtime Gateway); use the OpenAI API key if none is available or connection resolution fails. plugin: never fall back to the key. openai-api-key: use only the key.",
+        "auto: prefer a realtime connection plugin, if one is installed, such as a company realtime proxy; use the OpenAI API key if none is available or connection resolution fails. plugin: never fall back to the key. openai-api-key: use only the key.",
       options: [...CONNECTIONS],
       default: "auto",
     },
