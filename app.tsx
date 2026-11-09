@@ -22,7 +22,7 @@ import {
   useSettings,
 } from "@get-bb/plugin-sdk/app";
 import { isLive, sessionFor, stopAllSessions, subscribeAll, undockedSession, type Phase, type VoiceSession } from "./session";
-import { planCompactHosts } from "./compact-hosts";
+import { compactThreadComposers, planCompactHosts, type CompactComposer } from "./compact-hosts";
 import "./app.css";
 
 const LABELS: Record<Phase, string> = {
@@ -383,11 +383,53 @@ function ComposerVoice() {
 }
 
 /**
+ * bb's composer is a plugin (`builtin:composer`), swappable under Settings →
+ * Appearance → Composer, so these markers belong to that plugin rather than to
+ * a stable bb API. A different composer can therefore leave a composer compact
+ * with no marker to find; the count check in planCompactHosts already refuses
+ * to guess there, and warnUnhostedComposers says so out loud instead of the
+ * button quietly not appearing.
+ */
+const COMPACT_FORM_SELECTOR = "form[data-promptbox][data-promptbox-compact]";
+
+/**
  * The composers on screen that bb is drawing compact: collapsed or phone
  * width, the case where its action row leaves our composer action out.
  */
 function compactComposerForms(): HTMLFormElement[] {
-  return Array.from(document.querySelectorAll<HTMLFormElement>("form[data-promptbox][data-promptbox-compact]"));
+  return Array.from(document.querySelectorAll<HTMLFormElement>(COMPACT_FORM_SELECTOR));
+}
+
+/** One warning per distinct lament, so a re-render cannot flood the console. */
+const warned = new Set<string>();
+function warnOnce(message: string, detail?: unknown) {
+  if (warned.has(message)) return;
+  warned.add(message);
+  console.warn(`[voice-mode] ${message}`, detail ?? "");
+}
+
+/**
+ * Say so when a composer is compact and we can't find its form, which is what a
+ * swapped composer looks like from here. Without this the button just doesn't
+ * appear, and a silent feature loss is hard to tell from a bug.
+ */
+function warnUnhostedComposers(composers: readonly CompactComposer[], formCount: number) {
+  const compact = compactThreadComposers(composers).length;
+  if (!compact) return;
+  if (!formCount) {
+    warnOnce(
+      `voice mode can't place its button: ${compact} compact thread composer(s) but no ${COMPACT_FORM_SELECTOR}. ` +
+        "bb's compact composer has no plugin action slot, so voice mode hosts its own. If you switched composer " +
+        "under Settings → Appearance → Composer, this marker may not be there.",
+    );
+    return;
+  }
+  if (formCount !== compact) {
+    warnOnce(
+      `voice mode is standing down: ${compact} compact thread composer(s) vs ${formCount} compact form(s).`,
+      { composers: compact, forms: formCount },
+    );
+  }
 }
 
 /**
@@ -398,8 +440,13 @@ function compactComposerForms(): HTMLFormElement[] {
  * nothing, leaving bb's own controls untouched rather than guessing.
  */
 function CompactVoiceButtons() {
-  const hosts = planCompactHosts(useComposers(), compactComposerForms().length);
-  if (!hosts) return null;
+  const composers = useComposers();
+  const formCount = compactComposerForms().length;
+  const hosts = planCompactHosts(composers, formCount);
+  if (!hosts) {
+    warnUnhostedComposers(composers, formCount);
+    return null;
+  }
   return (
     <>
       {hosts.map((host) => (

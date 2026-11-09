@@ -25,6 +25,21 @@ export interface CompactHost {
   readonly compactCount: number;
 }
 
+/** A compact composer whose scope is a thread, so its id is present. */
+export interface CompactThreadComposer extends CompactComposer {
+  readonly scope: { readonly kind: "thread"; readonly threadId: string };
+}
+
+/** The composers on screen that bb is drawing compact, and that we can host. */
+export function compactThreadComposers(
+  composers: readonly CompactComposer[],
+): CompactThreadComposer[] {
+  return composers.filter(
+    (composer): composer is CompactThreadComposer =>
+      composer.layout === "compact" && composer.scope.kind === "thread" && !!composer.scope.threadId,
+  );
+}
+
 /**
  * Pair each thread composer bb is drawing compact with a compact form.
  *
@@ -37,19 +52,13 @@ export function planCompactHosts(
   composers: readonly CompactComposer[],
   formCount: number,
 ): CompactHost[] | null {
-  const hosts: CompactHost[] = [];
-  for (const composer of composers) {
-    if (composer.layout !== "compact" || composer.scope.kind !== "thread") continue;
-    const threadId = composer.scope.threadId;
-    if (!threadId) continue;
-    hosts.push({
-      key: composer.key,
-      threadId,
-      canStart: composer.isEmpty && !composer.isRunning,
-      compactIndex: hosts.length,
-      compactCount: 0,
-    });
-  }
-  if (!hosts.length || formCount !== hosts.length) return null;
-  return hosts.map((host) => ({ ...host, compactCount: hosts.length }));
+  const compact = compactThreadComposers(composers);
+  if (!compact.length || formCount !== compact.length) return null;
+  return compact.map((composer, index) => ({
+    key: composer.key,
+    threadId: composer.scope.threadId,
+    canStart: composer.isEmpty && !composer.isRunning,
+    compactIndex: index,
+    compactCount: compact.length,
+  }));
 }
