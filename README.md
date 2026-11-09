@@ -39,7 +39,8 @@ Pick one in **Settings → Plugins → Voice Mode** (or `bb plugin config voice-
   `{ protocol: "openai-realtime", url, headers, model? }` (`url` must be
   `wss://`). That plugin picks the model; Voice Mode's `model` setting
   doesn't apply. This lets a company proxy own credentials and the model
-  choice.
+  choice. See [Connection plugins](#connection-plugins) for the two that are
+  known to work.
 
 `connection` decides which one:
 
@@ -56,22 +57,42 @@ Pick one in **Settings → Plugins → Voice Mode** (or `bb plugin config voice-
 - `openai-api-key` uses only the configured OpenAI API key and ignores
   connection plugins.
 
-### Subscriptions and ChatGPT sign-in
+### Connection plugins
 
-Voice Mode has no subscription sign-in of its own. It talks to the OpenAI
-Realtime API with an OpenAI API key, or with whatever credential a connection
-plugin returns.
+Voice Mode installs with none of these. Both below plug into the
+`realtimeConnection` hook, so Voice Mode itself doesn't need to know about
+them. Install one and leave `connection` on `auto`.
 
-A community plugin covers the subscription case: `ChatGPT Realtime
-Connection` (`codex-realtime`) by gpambrozio hands Voice Mode the ChatGPT
-token `codex login` already stores on disk:
+**Realtime Gateway** — runs sessions through a Vercel AI Gateway key, so voice
+bills to one gateway account and the bb host never needs an OpenAI key:
+
+```bash
+bb plugin install 'git:github.com/steveafrost/bb-plugin-realtime-gateway@^0.1.1'
+bb realtime-gateway test   # mint a secret and open one real session
+```
+
+Docs: https://github.com/steveafrost/bb-plugin-realtime-gateway
+
+**ChatGPT Realtime Connection** (`codex-realtime`, by gpambrozio) — hands
+Voice Mode the ChatGPT token `codex login` already stores on disk. This is the
+subscription path:
 
 ```bash
 bb plugin install 'git:github.com/gpambrozio/bb-plugins@>=0.1.0' --plugin codex-realtime --tag-prefix codex-realtime/
 ```
 
-The plugin's own documentation is at
-https://github.com/gpambrozio/bb-plugins/tree/main/codex-realtime
+Docs: https://github.com/gpambrozio/bb-plugins/tree/main/codex-realtime
+
+Only one connection plugin can serve a session: if two are installed, Voice
+Mode asks the first one discovery returns and ignores the rest. Uninstall the
+other, or set `connection` explicitly.
+
+### Subscriptions and ChatGPT sign-in
+
+Voice Mode has no subscription sign-in of its own. It talks to the OpenAI
+Realtime API with an OpenAI API key, or with whatever credential a connection
+plugin returns — so the subscription case is the `codex-realtime` plugin
+above.
 
 It is a community plugin, not maintained here. Sending that token to the
 Realtime API is undocumented by OpenAI, and OpenAI already refuses it for at

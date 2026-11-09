@@ -165,7 +165,7 @@ export default function plugin(bb: BbPluginApi) {
       type: "select",
       label: "Connection",
       description:
-        "auto: prefer a realtime connection plugin, if one is installed, such as a company realtime proxy; use the OpenAI API key if none is available or connection resolution fails. plugin: never fall back to the key. openai-api-key: use only the key.",
+        "auto: prefer a realtime connection plugin, if one is installed, such as a company realtime proxy; use the OpenAI API key if none is available or connection resolution fails. plugin: never fall back to the key. openai-api-key: use only the key. Known plugins: realtime-gateway (github.com/steveafrost/bb-plugin-realtime-gateway) and codex-realtime (github.com/gpambrozio/bb-plugins, for ChatGPT subscriptions).",
       options: [...CONNECTIONS],
       default: "auto",
     },
