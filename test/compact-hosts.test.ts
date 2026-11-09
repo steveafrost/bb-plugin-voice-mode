@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planCompactHosts, type CompactComposer } from "../compact-hosts";
+import { compactThreadComposers, planCompactHosts, type CompactComposer } from "../compact-hosts";
 
 const thread = (key: string, over: Partial<CompactComposer> = {}): CompactComposer => ({
   key,
@@ -65,5 +65,17 @@ describe("planCompactHosts", () => {
       3,
     );
     expect(hosts?.map((host) => host.canStart)).toEqual([true, false, false]);
+  });
+});
+
+describe("compactThreadComposers", () => {
+  it("keeps only compact thread composers that carry a thread id", () => {
+    const kept = compactThreadComposers([
+      thread("a"),
+      thread("b", { layout: "expanded" }),
+      thread("c", { scope: { kind: "new-thread" } }),
+      thread("d", { scope: { kind: "thread" } }),
+    ]);
+    expect(kept.map((composer) => composer.key)).toEqual(["a"]);
   });
 });
