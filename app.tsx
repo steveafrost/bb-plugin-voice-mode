@@ -22,6 +22,7 @@ import {
   useSettings,
 } from "@get-bb/plugin-sdk/app";
 import { isLive, sessionFor, stopAllSessions, subscribeAll, undockedSession, type Phase, type VoiceSession } from "./session";
+import { planCompactHosts } from "./compact-hosts";
 import "./app.css";
 
 const LABELS: Record<Phase, string> = {
@@ -397,23 +398,19 @@ function compactComposerForms(): HTMLFormElement[] {
  * nothing, leaving bb's own controls untouched rather than guessing.
  */
 function CompactVoiceButtons() {
-  const composers = useComposers().filter(
-    (composer) => composer.scope.kind === "thread" && composer.layout === "compact",
-  );
-  if (!composers.length || compactComposerForms().length !== composers.length) return null;
+  const hosts = planCompactHosts(useComposers(), compactComposerForms().length);
+  if (!hosts) return null;
   return (
     <>
-      {composers.map((composer, index) =>
-        composer.scope.kind === "thread" ? (
-          <ThreadComposerVoice
-            key={composer.key}
-            threadId={composer.scope.threadId}
-            canStart={composer.isEmpty && !composer.isRunning}
-            compactIndex={index}
-            compactCount={composers.length}
-          />
-        ) : null,
-      )}
+      {hosts.map((host) => (
+        <ThreadComposerVoice
+          key={host.key}
+          threadId={host.threadId}
+          canStart={host.canStart}
+          compactIndex={host.compactIndex}
+          compactCount={host.compactCount}
+        />
+      ))}
     </>
   );
 }
