@@ -23,6 +23,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { isLive, sessionFor, stopAllSessions, subscribeAll, undockedSession, type Phase, type VoiceSession } from "./session";
 import { compactThreadComposers, planCompactHosts, type CompactComposer } from "./compact-hosts";
+import { ConnectionPluginsSection } from "./connection-plugins";
 import "./app.css";
 
 const LABELS: Record<Phase, string> = {
@@ -882,6 +883,15 @@ export default definePluginApp((app) => {
   app.slots.experimental_appOverlay({
     id: "voice-mode-compact",
     component: CompactVoiceButtons,
+  });
+
+  // The Connection setting's description can only be plain text, so the two
+  // known connection plugins get links and install commands here.
+  app.slots.settingsSection({
+    id: "connection-plugins",
+    title: "Connection plugins",
+    description: "Voice Mode installs with none of these. Install one and leave Connection on auto.",
+    component: ConnectionPluginsSection,
   });
 
   app.contentScripts.register({
