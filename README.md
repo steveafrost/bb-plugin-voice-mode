@@ -68,7 +68,7 @@ them. Install one and leave `connection` on `auto`.
 bills to one gateway account and the bb host never needs an OpenAI key:
 
 ```bash
-bb plugin install 'git:github.com/steveafrost/bb-plugin-realtime-gateway@^0.1.1'
+bb plugin install 'git:github.com/steveafrost/bb-plugin-realtime-gateway@v0.1.1'
 bb realtime-gateway test   # mint a secret and open one real session
 ```
 
@@ -79,7 +79,7 @@ Voice Mode the ChatGPT token `codex login` already stores on disk. This is the
 subscription path:
 
 ```bash
-bb plugin install 'git:github.com/gpambrozio/bb-plugins@>=0.1.0' --plugin codex-realtime --tag-prefix codex-realtime/
+bb plugin install 'git:github.com/gpambrozio/bb-plugins@codex-realtime/v0.1.0' --plugin codex-realtime
 ```
 
 Docs: https://github.com/gpambrozio/bb-plugins/tree/main/codex-realtime

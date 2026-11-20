@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4
+
+- Pin the connection plugin install commands in settings and the README to exact tags (Realtime Gateway `v0.1.1`, `codex-realtime/v0.1.0`). bb treats a tag as pinned, so `bb plugin update` no longer follows new releases of those repositories.
+
 ## 0.3.3
 
 - Say to update the connection plugin when it is installed but too old to list models. Shopify AI before 0.6.0 provides `realtimeConnection` without `models.list`, and the model pickers used to say to install it.
