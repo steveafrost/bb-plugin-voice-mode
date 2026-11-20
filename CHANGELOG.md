@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- Say to update the connection plugin when it is installed but too old to list models. Shopify AI before 0.6.0 provides `realtimeConnection` without `models.list`, and the model pickers used to say to install it.
+
 ## 0.3.2
 
 - Stop returning the previous task's output from `get_agent_status` while the agent is active or starting. The reply says work is still in progress.

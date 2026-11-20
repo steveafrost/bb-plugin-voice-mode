@@ -80,6 +80,8 @@ async function startSession(options: {
   }>;
   interactions?: unknown[];
   thread?: Record<string, unknown>;
+  /** False for a connection plugin too old to publish `models.list`. */
+  connectionPluginListsModels?: boolean;
 }) {
   const { bb, harness } = createFakePluginHost({
     pluginId: "voice-mode",
@@ -100,7 +102,7 @@ async function startSession(options: {
             return [{ pluginId: "shopify-ai", method: "realtimeConnection" }];
           }
           if (method === "models.list") {
-            return [{ pluginId: "shopify-ai", method: "models.list" }];
+            return options.connectionPluginListsModels === false ? [] : [{ pluginId: "shopify-ai", method: "models.list" }];
           }
           return [];
         },
@@ -403,6 +405,25 @@ describe("connection", () => {
       /No model-listing plugin/,
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("says to update a connection plugin that is too old to list models", async () => {
+    const auto = await startSession({ connectionPlugin: true, connectionPluginListsModels: false });
+    await expect(auto.harness.callRpc("models.list", { scope: "realtime" })).rejects.toThrow(
+      /Shopify AI plugin \(shopify-ai\) is too old.*0\.6\.0 or newer.*Or add an OpenAI API key/,
+    );
+    const pluginOnly = await startSession({
+      settings: { connection: "plugin" },
+      connectionPlugin: true,
+      connectionPluginListsModels: false,
+    });
+    await expect(pluginOnly.harness.callRpc("models.list", { scope: "realtime" })).rejects.toThrow(
+      /too old.*Or switch Connection away from plugin/,
+    );
+    const none = await startSession({ connectionPlugin: false });
+    await expect(none.harness.callRpc("models.list", { scope: "realtime" })).rejects.toThrow(
+      /Install and enable the Shopify AI plugin/,
+    );
   });
 
   it("lists OpenAI models for the API key, tagging realtime and GPT-Live ones", async () => {

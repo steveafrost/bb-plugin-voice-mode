@@ -362,6 +362,11 @@ export default async function plugin(bb: BbPluginApi) {
     return withDefaultModels(next);
   }
 
+  const outdatedModelListMessage = (pluginId: string) =>
+    pluginId === "shopify-ai"
+      ? "The installed Shopify AI plugin (shopify-ai) is too old to list voice models. Update it to 0.6.0 or newer. Calls still work with the saved model."
+      : `The ${pluginId} plugin provides the voice connection but no model list. Update it if a newer version lists models. Calls still work with the saved model.`;
+
   async function listLiveModels(
     scope: "realtime" | "transcription" | "delegation",
     refresh = false,
@@ -369,6 +374,7 @@ export default async function plugin(bb: BbPluginApi) {
   ): Promise<{ models: VoiceModelOption[]; latestModelsOnly?: boolean }> {
     const { connection, openaiApiKey } = await settings.get();
     const mode = sourceOverride ?? connection;
+    let outdatedProvider: string | null = null;
 
     if (mode !== "openai-api-key") {
       const methods = await bb.sdk.plugins.experimental_discoverRpc({ method: "models.list" });
@@ -398,9 +404,16 @@ export default async function plugin(bb: BbPluginApi) {
           ...(res.latestModelsOnly !== undefined ? { latestModelsOnly: res.latestModelsOnly } : {}),
         };
       }
+      // A connection plugin without `models.list` (shopify-ai before 0.6.0) can
+      // still place calls, so say it needs updating instead of installing.
+      const connections = await bb.sdk.plugins.experimental_discoverRpc({ method: CONNECTION_RPC });
+      const stale = connections.find((entry) => entry.method === CONNECTION_RPC && entry.pluginId !== PLUGIN_ID);
+      if (stale) outdatedProvider = stale.pluginId;
       if (mode === "plugin") {
         throw new Error(
-          "No model-listing plugin (such as shopify-ai) is installed or enabled. Install one or switch Connection away from plugin.",
+          outdatedProvider
+            ? `${outdatedModelListMessage(outdatedProvider)} Or switch Connection away from plugin.`
+            : "No model-listing plugin (such as shopify-ai) is installed or enabled. Install one or switch Connection away from plugin.",
         );
       }
     }
@@ -410,7 +423,9 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(
         mode === "openai-api-key"
           ? "Add an OpenAI API key in Voice Mode settings to list voice models."
-          : "Install and enable the Shopify AI plugin (shopify-ai), or add an OpenAI API key to list voice models.",
+          : outdatedProvider
+            ? `${outdatedModelListMessage(outdatedProvider)} Or add an OpenAI API key.`
+            : "Install and enable the Shopify AI plugin (shopify-ai), or add an OpenAI API key to list voice models.",
       );
     }
     const response = await fetch(OPENAI_MODELS_URL, {
