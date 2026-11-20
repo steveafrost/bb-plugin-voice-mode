@@ -2,6 +2,9 @@
 // (app.slots.settingsSection). The host draws the heading and subheading from
 // the registration; everything below is ours. Content mirrors the README's
 // "Connection plugins" section — keep the two in step.
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { useSdk, useSettings } from "@get-bb/plugin-sdk/app";
+import { activeCallRoute, subscribeAll } from "./session";
 import type { PluginSettingsSectionProps } from "@get-bb/plugin-sdk/app";
 
 interface ConnectionPlugin {
@@ -46,8 +49,53 @@ const PLUGINS: readonly ConnectionPlugin[] = [
 ];
 
 export function ConnectionPluginsSection(_props: PluginSettingsSectionProps) {
+  const { values } = useSettings();
+  const sdk = useSdk();
+  const [providers, setProviders] = useState<string[]>();
+  const [realtimeModel, setRealtimeModel] = useState<string>();
+  const [failed, setFailed] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const call = useSyncExternalStore(subscribeAll, activeCallRoute);
+  useEffect(() => {
+    let alive = true;
+    setProviders(undefined);
+    setFailed(false);
+    setRealtimeModel(undefined);
+    sdk.plugins.experimental_discoverRpc({ method: "realtimeConnection" }).then(async rows => {
+      const ids = rows.filter(r => r.pluginId !== "voice-mode" && r.method === "realtimeConnection").map(r => r.pluginId);
+      if (!alive) return;
+      setProviders(ids);
+      if (ids.includes("codex-realtime")) {
+        const settings = await sdk.plugins.getSettings({ pluginId: "codex-realtime" }).catch(() => undefined);
+        if (alive && settings) setRealtimeModel(String(settings.values.model || "gpt-realtime-2.1"));
+      }
+    }, () => { if (alive) setFailed(true); });
+    return () => { alive = false; };
+  }, [sdk, revision]);
+  const provider = providers?.[0];
+  const direct = String(values?.model ?? "gpt-realtime-2") + " · project API key";
+  const providerLabel = provider === "codex-realtime" && realtimeModel ? realtimeModel + " · " + provider : provider;
+  const subscription = "Realtime 2.1 · codex-realtime" + (providers && !providers.includes("codex-realtime")
+    ? " (provider missing)" : realtimeModel && realtimeModel !== "gpt-realtime-2.1" ? " (requires provider model gpt-realtime-2.1)" : "");
+  const voice = String(values?.voice ?? "marin");
+  const stages: Record<string, string[]> = {
+    "codex-live-first": ["Live 1.1 · Codex login · " + String(values?.codexLiveVoice ?? "cove"), subscription + " · " + voice],
+    "live-first": ["Live 1 · project API key · " + voice, subscription + " · " + voice],
+    "openai-live": ["Live 1 · project API key · " + voice],
+    "openai-api-key": [direct + " · " + voice],
+    plugin: [providerLabel ?? "Connection plugin"],
+    auto: [providerLabel ?? "Connection plugin if available", direct],
+  };
   return (
     <div className="space-y-4 text-xs">
+      <dl className="space-y-1" aria-live="polite">
+        <dt className="font-medium">Next call · primary → fallback</dt>
+        <dd>{values ? stages[String(values.connection ?? "auto")]?.join(" → ") : "Loading settings…"}</dd>
+        <dt className="font-medium">Current call</dt><dd>{call}</dd>
+        <dt className="font-medium">Realtime providers</dt>
+        <dd>{failed ? "Discovery unavailable" : providers ? providers.map(id => id === "codex-realtime" && realtimeModel ? id + " (" + realtimeModel + ")" : id).join(", ") || "None detected" : "Checking…"}{" "}
+          <button type="button" onClick={() => setRevision(n => n + 1)}>Refresh</button></dd>
+      </dl>
       {PLUGINS.map((plugin) => (
         <div key={plugin.name} className="space-y-1.5">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">

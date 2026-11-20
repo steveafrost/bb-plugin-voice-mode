@@ -305,7 +305,7 @@ function VoicePill({
   // While sliding closed, keep showing what the pill showed last.
   const lastShown = useRef(state);
   if (state.phase !== "off") lastShown.current = state;
-  const { phase, muted, caption, agentStatus } = closing && state.phase === "off" ? lastShown.current : state;
+  const { phase, muted, caption, agentStatus, route, badge } = closing && state.phase === "off" ? lastShown.current : state;
   const pill = useRef<HTMLDivElement>(null);
   useSlidingWidth(pill, session, state.phase !== "off");
   useSlideClosed(pill, session, closing && state.phase === "off", toStart, onClosed);
@@ -321,7 +321,7 @@ function VoicePill({
   // Errors are usually setup problems (no key, no connection plugin), so say
   // what went wrong in the pill rather than only in a tooltip.
   const status = phase === "error" ? caption || "Voice error" : muted && micActive ? "Muted" : LABELS[phase];
-  const detail = [agentStatus ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
+  const detail = [route, agentStatus ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
 
   return (
     <div
@@ -342,7 +342,7 @@ function VoicePill({
     >
       <span role="status" aria-live="polite" title={detail || undefined} className="inline-flex items-center gap-2 pr-1">
         {phase === "error" ? <Glyph name="alert" /> : <LevelWave session={session} phase={phase} muted={muted && micActive} />}
-        <span className={cn("text-xs font-medium text-foreground/80", phase === "error" && "max-w-72 truncate")}>{status}</span>
+        <span className={cn("text-xs font-medium text-foreground/80", phase === "error" && "max-w-72 truncate")}>{status}</span>{badge && phase !== "error" && <span className="rounded border border-current/20 px-1 text-[10px] font-medium tabular-nums">{badge}</span>}
       </span>
       {micActive ? (
         <button
@@ -760,17 +760,17 @@ function FloatingVoice() {
 }
 
 function FloatingPill({ session, placement }: { session: VoiceSession; placement: "sidebar" | "floating" }) {
-  const { phase, muted, caption, agentStatus } = useVoiceState(session);
+  const { phase, muted, caption, agentStatus, route, badge } = useVoiceState(session);
   const navigate = useBbNavigate();
   // Detailed unless the user picked compact (also while settings are loading, so it doesn't flip).
   const detailed = useSettings().values?.widgetStyle !== "compact";
   const micActive = phase === "listening" || phase === "speaking";
   const status = muted && micActive ? "Muted" : LABELS[phase];
-  const detail = [agentStatus ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
+  const detail = [route, agentStatus ? `Agent: ${agentStatus}` : "", caption].filter(Boolean).join("\n");
   const statusRow = (
     <span role="status" aria-live="polite" className="inline-flex min-w-0 items-center gap-2">
       <LevelWave session={session} phase={phase} muted={muted && micActive} />
-      <span className="truncate text-xs font-medium text-foreground/80">{status}</span>
+      <span className="truncate text-xs font-medium text-foreground/80">{status}</span>{badge && phase !== "error" && <span className="rounded border border-current/20 px-1 text-[10px] font-medium tabular-nums">{badge}</span>}
     </span>
   );
   const backButton = (
@@ -889,8 +889,8 @@ export default definePluginApp((app) => {
   // known connection plugins get links and install commands here.
   app.slots.settingsSection({
     id: "connection-plugins",
-    title: "Connection plugins",
-    description: "Voice Mode installs with none of these. Install one and leave Connection on auto.",
+    title: "Voice route and Realtime providers",
+    description: "For the Realtime 2.1 subscription fallback, configure ChatGPT Realtime Connection. Codex Live 1.1 uses the local Codex CLI.",
     component: ConnectionPluginsSection,
   });
 

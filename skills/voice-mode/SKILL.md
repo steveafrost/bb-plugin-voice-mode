@@ -26,3 +26,20 @@ chat" command (default Ctrl+Shift+V, rebindable in Settings → Keyboard). Setti
 model, voice, widgetStyle, messageText, prefixMessages). With `connection` on `auto`, a plugin that publishes a
 discoverable `realtimeConnection` rpc supplies the session; otherwise the
 OpenAI API key is used.
+
+## GPT-Live
+
+Select Connection → `openai-live` with a project API key in the secret Voice
+Mode setting. Project API usage starts when you open a call. The server streams
+audio to the Live API and sends a delegated transcript to the selected BB
+thread. Wait for the thread result before speaking about the outcome. Questions and follow-ups go to the current thread automatically, including during work. Use the BB controls for stopping thread work.
+For a key-free protocol check, run `npm test` in the plugin checkout.
+
+Use Connection → live-first to try the project-key Live session afresh on each
+call and automatically reconnect on the configured codex-realtime 2.1 route
+if Live is unavailable. The indicator reports the fallback. A model switch
+keeps the BB thread and microphone but starts a fresh voice conversation.
+
+For Codex Live 1.1, install the bridge as described in the README and use `codex-live-first` with the server’s Codex ChatGPT login. Its fallback is subscription Realtime 2.1.
+
+For direct subscription Realtime 2.1 use `plugin` with the configured `codex-realtime` provider. Eligible Pro and Business API credit grants can fund the GPT-Live-1 project-key route. Check the linked organization and grant in API Platform billing.

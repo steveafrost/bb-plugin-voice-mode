@@ -28,9 +28,17 @@ agent is done, and stops talking the moment you talk over it.
 
 ## Setup
 
-Pick one in **Settings → Plugins → Voice Mode** (or `bb plugin config voice-mode`):
+Choose a voice route in **Settings → Plugins → Voice Mode**.
 
-- **OpenAI API key** — set `openaiApiKey`. Choose `model` (`gpt-realtime-2`
+| First model | Connection | Credentials and fallback |
+| --- | --- | --- |
+| Codex Live 1.1 | `codex-live-first` | Codex CLI signed in to ChatGPT on the BB server. Falls back directly to the configured subscription Realtime 2.1 connection. No project API key required. |
+| GPT-Live-1 | `openai-live` or `live-first` | Project API key. Choose `openai-live` for Live only, or `live-first` to fall back to subscription Realtime 2.1. |
+| Realtime 2.1 directly | `plugin` | Configure ChatGPT Realtime Connection (`codex-realtime`) for `gpt-realtime-2.1` and ensure discovery selects it. |
+
+In settings, **Voice route and Realtime providers** shows the next call sequence, the current call in this client, and detected providers. Discovery checks plugin availability; a connected call confirms a live session. Live 1.1 has a separate voice selection. Live 1 and Realtime share the other voice setting, including after fallback. The connection menu displays model names and sign-in methods. The Direct Realtime API model field applies only to direct API calls. Each call starts with the selected route. The two Live modes with fallback go directly to Realtime 2.1 when their primary route is unavailable. The generic `auto` and direct Realtime API-key modes are described below.
+
+- **Realtime with an OpenAI API key** — set `openaiApiKey`. Choose `model` (`gpt-realtime-2`
   by default) and `voice`. The key is only ever sent to
   `wss://api.openai.com/v1/realtime`, and audio goes straight to OpenAI,
   around any company proxy. For another endpoint, use a connection plugin.
@@ -56,6 +64,40 @@ Pick one in **Settings → Plugins → Voice Mode** (or `bb plugin config voice-
   when sessions must stay on your company's connection.
 - `openai-api-key` uses only the configured OpenAI API key and ignores
   connection plugins.
+
+### Trying GPT-Live-1
+
+Select `openai-live`, choose a voice (the default is Marin), and start a call
+from a thread. A call uses the project's API billing. For a first test,
+say “Проверь название текущего проекта”. Check that the thread receives the
+spoken request once and that you hear its result. End the call with the hangup
+button. To use your previous connection, select its previous Connection value.
+
+Live streams 24 kHz PCM and uses client delegation. It forwards the
+caller’s questions, follow-ups and requests verbatim to the current BB thread.
+Follow-ups can steer work in progress. Greetings and microphone checks stay in voice. Use BB to stop work.
+The Realtime model selector, rewritten text and Realtime VAD settings apply to
+the Realtime connection modes. Session limits and the spoken-message prefix
+also apply to Live. The API protocol tests run with `npm test` and a mock socket.
+
+[OpenAI Live WebSocket](https://developers.openai.com/api/reference/resources/live/primary-websocket) · [Client delegation](https://developers.openai.com/api/docs/guides/live-delegation)
+
+### GPT-Live with subscription fallback
+
+For automatic selection choose **Connection → live-first**. Every call first
+opens its own GPT-Live session when a project key is configured. Missing keys,
+unavailable sessions, exhausted credits and interrupted Live connections switch
+the same call to the installed ChatGPT Realtime Connection configured for
+`gpt-realtime-2.1`. The call indicator reports the switch. The microphone
+remains open during an in-call switch. Words spoken while reconnecting may
+need repeating. Explicit hangup and content terminations end the call. A
+failed subscription connection shows an error. This mode never substitutes a
+metered Realtime project-key connection.
+
+
+Eligible paid ChatGPT Pro and Business customers can claim promotional API credits in Billing. Select the API organization, confirm its grant and expiry in API Platform billing, and use a project key from that organization for GPT-Live-1. Promotional credits are spent first. API usage can continue against purchased credits after the grant runs out. Fallback reacts to a failed or unavailable session. The Codex Live 1.1 route uses the signed-in Codex allowance separately.
+
+[OpenAI credit benefit and billing](https://help.openai.com/en/articles/20001626-api-credits-benefit-for-eligible-chatgpt-subscriptions) · [GPT-Live pricing](https://developers.openai.com/api/docs/models/gpt-live-1)
 
 ### Connection plugins
 
@@ -89,10 +131,7 @@ other, or set `connection` explicitly.
 
 ### Subscriptions and ChatGPT sign-in
 
-Voice Mode has no subscription sign-in of its own. It talks to the OpenAI
-Realtime API with an OpenAI API key, or with whatever credential a connection
-plugin returns — so the subscription case is the `codex-realtime` plugin
-above.
+For Codex Live 1.1, the local Codex CLI manages ChatGPT sign-in. For subscription Realtime 2.1, the ChatGPT Realtime Connection plugin supplies the connection.
 
 It is a community plugin, not maintained here. Sending that token to the
 Realtime API is undocumented by OpenAI, and OpenAI already refuses it for at
@@ -108,8 +147,7 @@ failing plugin's reason appear on screen instead of falling back to the key.
 Without a usable plugin connection or API key, the session fails with setup
 instructions. A plugin WebSocket handshake failure gets one connection
 refresh attempt; the same selection rules apply if that refresh fails to
-resolve a connection. Socket failures do not otherwise automatically switch
-providers.
+resolve a connection. The Live-first modes have the explicit fallback described above.
 
 Keys stay on the bb server host; the browser only talks to the plugin's own
 WebSocket route.
@@ -172,3 +210,9 @@ npm install
 npm run typecheck && npm test
 bb plugin build && bb plugin install . --yes
 ```
+
+### Codex Live 1.1 with ChatGPT sign-in
+
+On the BB server, install a Codex CLI with V3 realtime app-server support and sign in using the account that runs BB. Confirm the login with `codex login status`. From the matching plugin sources, run `python3 codex_voice.py --install` as that same user. This creates a local Python environment and installs the WebRTC bridge. Repeat this step after bridge updates.
+
+Select **codex-live-first** in Voice Mode and start a call. The **Live 1.1** badge identifies the route requesting `gpt-live-1.1-codex` with the selected Codex Live voice. The browser sends audio to BB, and the local bridge connects to the model via WebRTC. Spoken tasks go to the current BB thread. This route uses the server's Codex login. For fallback, configure the ChatGPT Realtime Connection plugin for `gpt-realtime-2.1`. The existing project-key routes remain available.

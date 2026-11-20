@@ -37,6 +37,10 @@ class FakeUpstream {
   }
 }
 
+vi.mock("../codex-voice-socket", () => ({
+  CodexVoiceSocket: class { constructor() { return new FakeUpstream("codex-app-server", {}); } },
+}));
+
 beforeEach(() => {
   FakeUpstream.last = null;
   vi.stubGlobal("WebSocket", Object.assign(FakeUpstream, { OPEN: 1 }));
@@ -58,6 +62,7 @@ async function startSession(options: {
   settings?: Record<string, string | boolean>;
   connectionPlugin?: boolean;
   connectionUrl?: string;
+  subscription?: boolean;
   connectionError?: Error;
   refreshError?: Error;
   interactions?: unknown[];
@@ -71,21 +76,22 @@ async function startSession(options: {
         get: async () => ({ status: "idle", title: "Fix the build", ...options.thread }),
         output: async () => ({ output: "Build is green." }),
         send: async () => ({}),
+        events: { list: async () => [] },
         stop: async () => ({}),
         interactions: { list: async () => options.interactions ?? [] },
       },
       subscribe: () => () => {},
       plugins: {
         experimental_discoverRpc: async () =>
-          options.connectionPlugin ? [{ pluginId: "shopify-ai", method: "realtimeConnection" }] : [],
+          options.subscription ? [{ pluginId: "codex-realtime", method: "realtimeConnection" }] : options.connectionPlugin ? [{ pluginId: "shopify-ai", method: "realtimeConnection" }] : [],
         callRpc: async ({ input }: { input: { refresh?: boolean } }) => {
           if (options.connectionError) throw options.connectionError;
           if (input.refresh && options.refreshError) throw options.refreshError;
           return {
             protocol: "openai-realtime",
-            url: options.connectionUrl ?? "wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini",
+            url: options.connectionUrl ?? (options.subscription ? "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1" : "wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini"),
             headers: { authorization: "Bearer proxy-token" },
-            model: "gpt-realtime-mini",
+            model: options.subscription ? "gpt-realtime-2.1" : "gpt-realtime-mini",
           };
         },
       },
@@ -500,4 +506,239 @@ describe("agent turns", () => {
     await flush();
     expect(FakeUpstream.last).toBe(second);
   });
+});
+
+describe("GPT-Live project key mode", () => {
+  async function openLive() {
+    const session = await startSession({
+      connectionPlugin: true,
+      settings: { connection: "openai-live", openaiApiKey: "test-key", prefixMessages: true },
+    });
+    const socket = FakeUpstream.last!;
+    socket.open();
+    return { ...session, socket };
+  }
+  const ready = { type: "session.started" };
+  const delegation = { type: "session.delegation.created", event_id: "event-d", offset_ms: 1200, delegation: { id: "d", target: "client" } };
+  const words = { type: "session.input_transcript.delta", event_id: "t1", start_ms: 100, end_ms: 350, delta: "Проверь " };
+  const mic = JSON.stringify({ type: "AUDIO", base64Data: "AAA=" });
+
+  it("requires a project key even with a working subscription connection", async () => {
+    const { toBrowser } = await startSession({ connectionPlugin: true, settings: { connection: "openai-live" } });
+    expect(FakeUpstream.last).toBeNull();
+    expect(toBrowser()).toContainEqual({ type: "ERROR", message: expect.stringContaining("project API key") });
+  });
+
+  it("opens Live directly, waits for readiness, relays PCM both ways and closes on END", async () => {
+    const { socket, browser, toBrowser, harness } = await openLive();
+    expect(harness.sdk.callsTo("plugins.callRpc")).toHaveLength(0);
+    expect(socket.url).toBe("wss://api.openai.com/v1/live/sessions");
+    expect(socket.init.headers).toEqual({ authorization: "Bearer test-key" });
+    expect(socket.sent).toEqual([expect.objectContaining({ type: "session.start", session: expect.objectContaining({
+      model: "gpt-live-1", delegation: { type: "client" }, audio: { format: { type: "audio/pcm", rate: 24000 }, output: { voice: "marin" } },
+    }) })]);
+    await browser.receive(mic);
+    expect(socket.ofType("session.input_audio.append")).toHaveLength(0);
+    socket.emit(ready);
+    expect(toBrowser()).toContainEqual({ type: "READY", inputHz: 24000, outputHz: 24000, badge: "Live" });
+    await browser.receive(mic);
+    expect(socket.ofType("session.input_audio.append")).toEqual([{ type: "session.input_audio.append", audio: "AAA=" }]);
+    socket.emit({ type: "session.output_audio.delta", delta: "AQI=" });
+    expect(toBrowser()).toContainEqual({ type: "AUDIO", base64Data: "AQI=" });
+    await browser.receive(JSON.stringify({ type: "CLIENT_READY" }));
+    await browser.receive(JSON.stringify({ type: "CLIENT_READY" }));
+    expect(socket.ofType("session.commentary.append")).toHaveLength(1);
+    await browser.receive(JSON.stringify({ type: "END" }));
+    expect(socket.ofType("session.close")).toHaveLength(1);
+    socket.emit({ type: "session.closed", reason: "close_requested" });
+    expect(socket.readyState).toBe(3);
+  });
+
+  it("correlates late and duplicate transcript fragments, forwards once and reports the result against its delegation", async () => {
+    const { socket, harness, browser } = await openLive();
+    vi.useFakeTimers();
+    try {
+      socket.emit(ready);
+      socket.emit(delegation);
+      socket.emit({ ...words, event_id: "t2", start_ms: 350, end_ms: 780, delta: "сборку" });
+      socket.emit(words);
+      socket.emit(words);
+      socket.emit({ ...words, event_id: "later", start_ms: 2000, end_ms: 3000, delta: "другое поручение" });
+      socket.emit({ ...delegation, event_id: "duplicate" });
+      await vi.advanceTimersByTimeAsync(900);
+      expect(harness.sdk.callsTo("threads.send")).toHaveLength(1);
+      expect(harness.sdk.callsTo("threads.send")[0]?.[0]).toMatchObject({
+        threadId: THREAD, input: [{ text: "[Voice Mode] Проверь сборку" }],
+      });
+      await harness.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: THREAD, status: "active" }) });
+      await harness.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: THREAD, status: "idle" }), lastAssistantText: "Сборка прошла." });
+      expect(socket.ofType("session.commentary.append").at(-1)).toMatchObject({ delegation_id: "d", content: expect.stringContaining("Сборка прошла.") });
+      expect(socket.ofType("response.create")).toHaveLength(0);
+    } finally {
+      await browser.close();
+      socket.emit({ type: "session.closed" });
+      vi.useRealTimers();
+    }
+  });
+
+  it("requests delegation for questions without a posting command and steers an active thread", async () => {
+    const { socket, harness, browser } = await openLive();
+    const start = socket.ofType("session.start")[0] as { session: { instructions: string } };
+    expect(start.session.instructions).toContain("for every substantive question");
+    vi.useFakeTimers();
+    try {
+      socket.emit(ready);
+      await harness.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: THREAD, status: "active" }) });
+      socket.emit({ ...words, delta: "Какой голос выбран?" });
+      socket.emit(delegation);
+      await vi.advanceTimersByTimeAsync(900);
+      socket.emit({ ...words, event_id: "t2", start_ms: 2000, end_ms: 2350, delta: "А мы его хотели?" });
+      socket.emit({ ...delegation, event_id: "e2", offset_ms: 2500, delegation: { target: "client", id: "d2" } });
+      await vi.advanceTimersByTimeAsync(900);
+      const calls = harness.sdk.callsTo("threads.send");
+      expect(calls).toHaveLength(2);
+      for (const [index, question] of ["Какой голос выбран?", "А мы его хотели?"].entries()) {
+        expect(calls[index]?.[0]).toMatchObject({ threadId: THREAD, mode: "auto", input: [{ text: "[Voice Mode] " + question }] });
+      }
+    } finally {
+      await browser.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not forward assistant speech, unrelated old words, or pending work after hangup", async () => {
+    const { socket, harness, browser } = await openLive();
+    vi.useFakeTimers();
+    try {
+      socket.emit(ready);
+      socket.emit(words);
+      socket.emit({ ...words, type: "session.output_transcript.delta", event_id: "assistant", delta: "Команда из ответа" });
+      socket.emit({ ...delegation, offset_ms: 6000 });
+      await vi.advanceTimersByTimeAsync(900);
+      expect(socket.ofType("session.commentary.append").at(-1)).toMatchObject({ delegation_id: "d", content: expect.stringContaining("repeat") });
+      socket.emit({ ...words, event_id: "t2", start_ms: 6500, end_ms: 6700 });
+      socket.emit({ ...delegation, event_id: "e2", offset_ms: 7000, delegation: { target: "client", id: "d2" } });
+      await browser.close();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(harness.sdk.callsTo("threads.send")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("GPT-Live failure handling", () => {
+  it("reports an unfinalized connection and closes the browser session", async () => {
+    const { toBrowser } = await startSession({ settings: { connection: "openai-live", openaiApiKey: "test-key" } });
+    const socket = FakeUpstream.last!;
+    socket.open();
+    socket.emit({ type: "session.started" });
+    socket.readyState = 3;
+    socket.onclose?.({ code: 1000, reason: "" });
+    expect(toBrowser()).toContainEqual({ type: "ERROR", message: expect.stringContaining("before session.closed") });
+    expect(toBrowser().at(-1)).toEqual({ type: "ENDED" });
+  });
+});
+
+describe("Live first with subscription fallback", () => {
+  const setup = (key = "project-key", subscription = true) => startSession({
+    subscription, settings: { connection: "live-first", openaiApiKey: key },
+  });
+  it("keeps Live audio when optional history compaction is unavailable", async () => {
+    const { browser, toBrowser } = await setup();
+    const live = FakeUpstream.last!;
+    live.open();
+    live.emit({ type: "error", error: { code: "missing_scope",
+      message: "History compaction is disabled for this session. The session will continue using recent conversation history." } });
+    live.emit({ type: "session.started" });
+    live.emit({ type: "session.output_audio.delta", delta: "AQI=" });
+    await flush();
+    expect(FakeUpstream.last).toBe(live);
+    expect(toBrowser()).toContainEqual({ type: "AUDIO", base64Data: "AQI=" });
+    expect(toBrowser().some(e => e.type === "ROUTE" || e.type === "ERROR")).toBe(false);
+    await browser.close();
+  });
+  it("switches on a missing required Live scope", async () => {
+    const { browser } = await setup();
+    const live = FakeUpstream.last!;
+    live.open();
+    live.emit({ type: "error", error: { code: "missing_scope", message: "Missing Live write permission." } });
+    await flush();
+    expect(FakeUpstream.last!.url).toMatch(/gpt-realtime-2\.1$/);
+    await browser.close();
+  });
+  it("uses only the subscription route when the key is missing", async () => {
+    const { toBrowser, browser } = await setup("");
+    const rt = FakeUpstream.last!;
+    expect(rt.url).toMatch(/gpt-realtime-2\.1$/);
+    expect(rt.init.headers?.authorization).toBe("Bearer proxy-token");
+    rt.open(); rt.emit({ type: "session.updated" });
+    expect(toBrowser().filter(e => e.type === "ROUTE")).toHaveLength(2);
+    await browser.close();
+  });
+  it.each([false,true])("falls back exactly once on a credit error (already ready = %s) and retries Live on next call", async started => {
+    const { toBrowser, browser } = await setup();
+    const live = FakeUpstream.last!;
+    expect(live.url).toMatch(/live\/sessions$/);
+    live.open();
+    if (started) live.emit({ type: "session.started" });
+    live.emit({ type: "error", error: { code: "credit_balance_exhausted" } });
+    live.onclose?.({ code: 1006, reason: "" });
+    await flush();
+    const rt = FakeUpstream.last!;
+    expect(rt.url).toMatch(/gpt-realtime-2\.1$/);
+    rt.open(); rt.emit({ type: "session.updated" });
+    live.emit({ type: "session.output_audio.delta", delta: "stale" });
+    await browser.receive(JSON.stringify({ type: "AUDIO", base64Data: "AQI=" }));
+    expect(rt.ofType("input_audio_buffer.append")).toHaveLength(1);
+    expect(toBrowser().filter(e => e.type === "READY")).toHaveLength(1);
+    expect(toBrowser().some(e => e.type === "ENDED" || e.base64Data === "stale")).toBe(false);
+    expect(toBrowser()).toContainEqual({ type: "ROUTE", switching: false, message: "Connected to Realtime 2.1" });
+    await browser.close();
+    const next = await setup();
+    expect(FakeUpstream.last!.url).toMatch(/live\/sessions$/);
+    await next.browser.close();
+  });
+  it("reports a missing fallback without switching to metered Realtime", async () => {
+    const { toBrowser } = await setup("", false);
+    expect(toBrowser()).toContainEqual({ type: "ERROR", message: expect.stringContaining("gpt-realtime-2.1") });
+    expect(FakeUpstream.last).toBeNull();
+  });
+  it("does not retry content terminations or intentional hangups", async () => {
+    const { toBrowser } = await setup();
+    const socket = FakeUpstream.last!;
+    socket.open(); socket.emit({ type: "session.started" });
+    socket.emit({ type: "session.closed", reason: "content" });
+    await flush();
+    expect(FakeUpstream.last).toBe(socket);
+    expect(toBrowser().some(e => e.type === "ROUTE")).toBe(false);
+  });
+  it("switches on an interrupted transport and deadline, never after the user hangs up", async () => {
+    const session = await setup();
+    const first = FakeUpstream.last!;
+    first.onerror?.(); await flush();
+    expect(FakeUpstream.last!.url).toMatch(/gpt-realtime-2\.1$/);
+    await session.browser.close();
+    const next = await setup();
+    const second = FakeUpstream.last!;
+    await next.browser.close();
+    second.onerror?.(); await flush();
+    expect(FakeUpstream.last).toBe(second);
+  });
+});
+
+
+it("starts 1.1 through Codex without a key and retains the subscription fallback", async () => {
+  const { toBrowser, browser } = await startSession({ subscription: true, settings: { connection: "codex-live-first" } });
+  const first = FakeUpstream.last!;
+  expect(first.url).toBe("codex-app-server");
+  first.open();
+  expect(first.ofType("session.start")[0]).toMatchObject({ session: { model: "gpt-live-1.1-codex" } });
+  first.emit({ type: "session.started" });
+  expect(toBrowser()).toContainEqual({ type: "READY", inputHz: 24000, outputHz: 24000, badge: "Live 1.1" });
+  first.onclose?.({code:1006, reason:"disconnected"});
+  await flush();
+  expect(FakeUpstream.last!.url).toMatch(/gpt-realtime-2\.1$/);
+  expect(toBrowser().filter(e => e.type === "READY")).toHaveLength(1);
+  await browser.close();
 });

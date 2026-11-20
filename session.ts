@@ -14,9 +14,11 @@ export interface VoiceState {
   muted: boolean;
   caption: string;
   agentStatus: string | null;
+  route: string;
+  badge: "" | "Live 1.1" | "Live" | "R2.1" | "R2.1…";
 }
 
-const OFF: VoiceState = { phase: "off", muted: false, caption: "", agentStatus: null };
+const OFF: VoiceState = { phase: "off", muted: false, caption: "", agentStatus: null, route: "", badge: "" };
 
 export const isLive = (phase: Phase) => phase === "connecting" || phase === "listening" || phase === "speaking";
 
@@ -92,7 +94,7 @@ export class VoiceSession {
   async start() {
     if (this.teardown) return;
     for (const other of sessions.values()) if (other !== this) await other.stop();
-    this.set({ phase: "connecting", caption: "", agentStatus: null, muted: false });
+    this.set({ phase: "connecting", caption: "", route: "", badge: "", agentStatus: null, muted: false });
     const ws = new WebSocket(sessionUrl(this.threadId));
     let stopMic: (() => Promise<void>) | null = null;
     let ended = false;
@@ -117,8 +119,12 @@ export class VoiceSession {
       const message = JSON.parse(String(event.data)) as ServerToBrowser;
       switch (message.type) {
         case "READY": {
+          if (message.badge) this.set({ badge: message.badge });
           const player = new Player(message.outputHz);
           this.player = player;
+          player.onActive = () => {
+            if (this.state.phase === "listening") this.set({ phase: "speaking" });
+          };
           player.onIdle = () => {
             if (this.state.phase === "speaking") this.set({ phase: "listening" });
           };
@@ -139,15 +145,19 @@ export class VoiceSession {
               break;
             }
             this.set({ phase: "listening" });
+            if (message.badge === "Live") send({ type: "CLIENT_READY" });
           } catch (error) {
             this.set({ caption: `Microphone unavailable: ${error instanceof Error ? error.message : String(error)}` });
             await cleanup("error");
           }
           break;
         }
+        case "ROUTE":
+          if (message.switching) this.player?.interrupt();
+          this.set({ route: message.message, badge: message.switching ? "R2.1…" : "R2.1", phase: message.switching || !this.player ? "connecting" : "listening" });
+          break;
         case "AUDIO":
-          this.player?.enqueue(message.base64Data);
-          if (this.state.phase !== "speaking") this.set({ phase: "speaking" });
+          this.player?.enqueue(message.base64Data, message.pts);
           break;
         case "INTERRUPTION":
           this.player?.interrupt();
@@ -193,6 +203,16 @@ const allListeners = new Set<() => void>();
 function notifyAll() {
   for (const listener of allListeners) listener();
 }
+/** Snapshot for the local settings panel, updated by the same events as the call UI. */
+export function activeCallRoute(): string {
+  for (const { state } of sessions.values()) {
+    if (!isLive(state.phase)) continue;
+    if (state.phase === "connecting") return state.badge === "R2.1…" ? "Connecting to Realtime 2.1" : "Connecting";
+    return state.badge === "Live" ? "Connected · Live 1" : state.badge === "R2.1" ? "Connected · Realtime 2.1" : state.badge ? "Connected · " + state.badge : "Connected · Realtime";
+  }
+  return "No active call in this client";
+}
+
 export function subscribeAll(listener: () => void) {
   allListeners.add(listener);
   return () => void allListeners.delete(listener);
