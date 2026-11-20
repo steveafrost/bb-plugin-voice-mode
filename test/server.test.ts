@@ -691,6 +691,39 @@ describe("agent turns", () => {
     }
   });
 
+  it.each(["active", "starting"])("does not return stale output for %s work or submit a new task", async (status) => {
+    const { harness, upstream } = await liveSession({ thread: { status } });
+    harness.sdk.stub("threads.output", async () => ({ output: "STALE: project context was missing" }));
+    say(upstream, "u1", "Are you still working?");
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "status", name: "get_agent_status", arguments: "{}" });
+    await flush(); await flush();
+    const items = upstream.ofType("conversation.item.create") as { item: { call_id?: string; output?: string } }[];
+    const output = items.find(m => m.item.call_id === "status")!.item.output!;
+    expect(output).toContain(status);
+    expect(output).not.toContain("STALE");
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(0);
+  });
+
+  it("reports a pending interaction instead of active progress or stale output", async () => {
+    const { upstream } = await liveSession({ thread: { status: "active" }, interactions: [{ id: "question" }] });
+    say(upstream, "u1", "Are you still working?");
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "status", name: "get_agent_status", arguments: "{}" });
+    await flush(); await flush();
+    const items = upstream.ofType("conversation.item.create") as { item: { call_id?: string; output?: string } }[];
+    const output = items.find(m => m.item.call_id === "status")!.item.output!;
+    expect(output).toContain("answer or approve");
+    expect(output).not.toContain("Build is green");
+  });
+
+  it("keeps the latest result available when work is idle", async () => {
+    const { upstream } = await liveSession();
+    say(upstream, "u1", "What was the result?");
+    upstream.emit({ type: "response.function_call_arguments.done", call_id: "status", name: "get_agent_status", arguments: "{}" });
+    await flush(); await flush();
+    const items = upstream.ofType("conversation.item.create") as { item: { call_id?: string; output?: string } }[];
+    expect(items.find(m => m.item.call_id === "status")!.item.output).toContain("Build is green.");
+  });
+
   it("reports a finished turn as a [bb update] the model can only talk about", async () => {
     const { harness, upstream } = await liveSession();
     await harness.emitThreadEvent("thread.active", { thread: thread("active") });
@@ -1270,7 +1303,8 @@ describe("gpt-live", () => {
     await settle();
     expect(harness.sdk.callsTo("threads.stop")).toHaveLength(1);
     const byId = Object.fromEntries(outputs(upstream).map((o) => [o.call_id, o.output]));
-    expect(byId.s1).toMatch(/waiting for the user.*Build is green/);
+    expect(byId.s1).toMatch(/waiting for the user.*answer or approve/);
+    expect(byId.s1).not.toContain("Build is green");
     expect(byId.s2).toBe("The agent was stopped.");
   });
 
