@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Stop returning the previous task's output from `get_agent_status` while the agent is active or starting. The reply says work is still in progress.
+- Say the user needs to answer or approve in bb when an interaction is pending, without the latest message.
+- Tell the voice to acknowledge a sent task and wait for its result, and not to treat a pending result as missing project context.
+
 ## 0.3.1
 
 - Copy a custom legacy realtime model setting to the picker on first start. Keep any saved picker selection.
