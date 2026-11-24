@@ -25,9 +25,7 @@ const VENDOR_LABELS: Record<string, string> = {
   moonshot: "Moonshot",
   openai: "OpenAI",
   "openai-oss": "OpenAI OSS",
-  proxy: "Shopify Routers",
   qwen: "Qwen",
-  typesafe: "TypeSafe (Jev)",
   xai: "xAI",
   zai: "Z.ai",
 };
@@ -260,7 +258,7 @@ export function VoiceModeModelSettings(_props: PluginSettingsSectionProps) {
         <VoiceModelSelectRow
           id="vm-realtime-model"
           label="Realtime voice model"
-          description="Supports gpt-realtime-* and gpt-live-* models. Used for OpenAI API key connections. Picking a model here also overrides Shopify AI's realtime model."
+          description="Supports gpt-realtime-* and gpt-live-* models. Used for OpenAI API key connections. Picking a model here also overrides the connection plugin's realtime model when supported."
           value={current.realtimeModel}
           catalog={realtimeCatalog}
           loading={loading}

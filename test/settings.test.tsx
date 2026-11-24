@@ -27,6 +27,10 @@ describe("model settings before the live catalog loads", () => {
     ]);
   });
 
+  it("explains that a picked realtime model overrides the connection default when supported", () => {
+    expect(html).toContain("overrides the connection plugin&#x27;s realtime model when supported");
+  });
+
   it("defaults the delegation picker to Auto", () => {
     expect(optionsOf("vm-delegation-model")).toEqual([
       { value: "", selected: true, label: "Auto (fastest live OpenAI model)" },
@@ -52,7 +56,8 @@ describe("VoiceModelSelectRow grouping and latestModelsOnly", () => {
         value=""
         catalog={{
           models: [
-            { id: "groq-rt", name: "Groq RT", vendor: "groq", groupLabel: "Groq (Fast)" },
+            { id: "provider-rt", name: "Provider RT", vendor: "proxy", groupLabel: "Provider Models" },
+            { id: "fallback-rt", name: "Fallback RT", vendor: "proxy" },
             { id: "gpt-realtime-2", name: "gpt-realtime-2", vendor: "openai" },
           ],
           latestModelsOnly: false,
@@ -66,9 +71,10 @@ describe("VoiceModelSelectRow grouping and latestModelsOnly", () => {
     expect(html).toContain(
       '<option value="" selected="">Use connection plugin default (API key: gpt-realtime-2)</option>',
     );
-    expect(html).toContain('<optgroup label="Groq (Fast)">');
+    expect(html).toContain('<optgroup label="Provider Models">');
+    expect(html).toContain('<optgroup label="Proxy">');
     expect(html).toContain('<optgroup label="OpenAI">');
-    expect(html.indexOf('label="Groq (Fast)"')).toBeLessThan(html.indexOf('label="OpenAI"'));
+    expect(html.indexOf('label="Provider Models"')).toBeLessThan(html.indexOf('label="OpenAI"'));
   });
 
   it("omits optgroup when only one group is returned", () => {

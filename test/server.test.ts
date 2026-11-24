@@ -1,8 +1,12 @@
+import { experimental_PluginRpcCallError } from "@get-bb/plugin-sdk";
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import plugin from "../server";
 
 const THREAD = "thr_test123";
+const CONNECTION_PLUGIN = "realtime-provider";
+const STRICT_CONNECTION_INPUT = z.strictObject({ refresh: z.boolean().optional() });
 
 /** Stand-in for the upstream OpenAI Realtime socket the backend opens. */
 class FakeUpstream {
@@ -80,8 +84,9 @@ async function startSession(options: {
   }>;
   interactions?: unknown[];
   thread?: Record<string, unknown>;
-  /** False for a connection plugin too old to publish `models.list`. */
-  connectionPluginListsModels?: boolean;
+  catalogPlugins?: string[];
+  omitCatalogMetadata?: boolean;
+  strictConnectionInput?: "rpc" | "zod";
 }) {
   const { bb, harness } = createFakePluginHost({
     pluginId: "voice-mode",
@@ -96,21 +101,28 @@ async function startSession(options: {
       },
       subscribe: () => () => {},
       plugins: {
-        experimental_discoverRpc: async ({ method }: { method?: string } = {}) => {
-          if (!options.connectionPlugin) return [];
-          if (!method || method === "realtimeConnection") {
-            return [{ pluginId: "shopify-ai", method: "realtimeConnection" }];
+        experimental_discoverRpc: async ({ method }: { method: string }) => {
+          if (method === "realtimeConnection" && options.connectionPlugin) {
+            return [{ pluginId: CONNECTION_PLUGIN, method }];
           }
           if (method === "models.list") {
-            return options.connectionPluginListsModels === false ? [] : [{ pluginId: "shopify-ai", method: "models.list" }];
+            const plugins = options.catalogPlugins ?? (options.connectionPlugin ? [CONNECTION_PLUGIN] : []);
+            return plugins.map((pluginId) => ({ pluginId, method }));
           }
           return [];
         },
-        callRpc: async ({ method, input }: { method: string; input: { refresh?: boolean; scope?: string } }) => {
+        callRpc: async ({
+          method,
+          input,
+          outputSchema,
+        }: {
+          method: string;
+          input: { refresh?: boolean; scope?: string; model?: string };
+          outputSchema: z.ZodType;
+        }) => {
           if (method === "models.list") {
-            return {
-              scope: input.scope ?? "realtime",
-              fetchedAt: Date.now(),
+            return outputSchema.parse({
+              ...(!options.omitCatalogMetadata ? { scope: input.scope, fetchedAt: Date.now() } : {}),
               ...(options.latestModelsOnly !== undefined ? { latestModelsOnly: options.latestModelsOnly } : {}),
               models:
                 input.scope === "transcription"
@@ -120,7 +132,18 @@ async function startSession(options: {
                     : (options.realtimeModels ?? [
                         { id: "live-realtime-model", name: "live-realtime-model", vendor: "openai" },
                       ]),
-            };
+            });
+          }
+          if (options.strictConnectionInput) {
+            const parsed = STRICT_CONNECTION_INPUT.safeParse(input);
+            if (!parsed.success) {
+              if (options.strictConnectionInput === "zod") throw parsed.error;
+              throw new experimental_PluginRpcCallError({
+                code: "invalid_input",
+                message: "Invalid input for realtimeConnection",
+                issues: parsed.error.issues.map(({ message }) => ({ message })),
+              });
+            }
           }
           if (options.connectionError) throw options.connectionError;
           if (input.refresh && options.refreshError) throw options.refreshError;
@@ -191,7 +214,10 @@ describe("connection", () => {
     const { harness } = await startSession({ settings: { openaiApiKey: "sk-test" }, connectionPlugin: true });
     expect(FakeUpstream.last!.url).toBe("wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini");
     expect(FakeUpstream.last!.init.headers).toEqual({ authorization: "Bearer proxy-token" });
-    expect(harness.sdk.callsTo("plugins.callRpc")[0]?.[0]).toMatchObject({ pluginId: "shopify-ai", method: "realtimeConnection" });
+    expect(harness.sdk.callsTo("plugins.callRpc")[0]?.[0]).toMatchObject({
+      pluginId: CONNECTION_PLUGIN,
+      method: "realtimeConnection",
+    });
   });
 
   it("falls back to the configured API key when plugin resolution fails in auto mode", async () => {
@@ -319,15 +345,57 @@ describe("connection", () => {
 
   it("leaves a connection plugin's own model alone until one is picked", async () => {
     const untouched = await startSession({ connectionPlugin: true, retainedDefaults: true });
-    expect(untouched.harness.sdk.callsTo("plugins.callRpc")[0]?.[0]).toMatchObject({
-      method: "realtimeConnection",
-      input: {},
-    });
+    const [connectionCall] = untouched.harness.sdk.callsTo("plugins.callRpc");
+    expect(connectionCall?.[0]).toMatchObject({ method: "realtimeConnection" });
+    expect((connectionCall?.[0] as { input: unknown }).input).toEqual({});
     const picked = await startSession({ connectionPlugin: true, realtimeModel: "live-realtime-model" });
     expect(picked.harness.sdk.callsTo("plugins.callRpc")[0]?.[0]).toMatchObject({
+      pluginId: CONNECTION_PLUGIN,
       method: "realtimeConnection",
       input: { model: "live-realtime-model" },
     });
+  });
+
+  it.each(["rpc", "zod"] as const)(
+    "retries once without model after a strict provider's %s input error",
+    async (strictConnectionInput) => {
+      const { harness } = await startSession({
+        connectionPlugin: true,
+        realtimeModel: "gpt-realtime",
+        strictConnectionInput,
+      });
+      const first = FakeUpstream.last!;
+      expect(first.url).toBe("wss://proxy.example.com/v1/realtime?model=gpt-realtime-mini");
+      first.onerror?.();
+      await flush();
+      expect(FakeUpstream.last).not.toBe(first);
+      expect(harness.sdk.callsTo("plugins.callRpc").map(([call]) => (call as { input: unknown }).input)).toEqual([
+        { model: "gpt-realtime" },
+        {},
+        { refresh: true, model: "gpt-realtime" },
+        { refresh: true },
+      ]);
+      expect(harness.logEntries).toContainEqual(expect.objectContaining({
+        level: "debug",
+        message: expect.stringContaining("retrying without it"),
+      }));
+    },
+  );
+
+  it.each([
+    ["prefers the connection plugin's catalog", true, true, CONNECTION_PLUGIN],
+    ["uses another catalog if the connection plugin publishes none", true, false, "catalog-provider"],
+    ["uses a catalog even without a connection plugin", false, false, "catalog-provider"],
+  ] as const)("%s", async (_name, connectionPlugin, connectionHasCatalog, expected) => {
+    const catalogPlugins = ["voice-mode", "catalog-provider", ...(connectionHasCatalog ? [CONNECTION_PLUGIN] : [])];
+    const { harness } = await startSession({ connectionPlugin, catalogPlugins, omitCatalogMetadata: true });
+    expect(await harness.callRpc("models.list", { scope: "realtime" })).toEqual({
+      models: [{ id: "live-realtime-model", name: "live-realtime-model", vendor: "openai" }],
+    });
+    const catalogCalls = harness.sdk.callsTo("plugins.callRpc")
+      .filter(([call]) => (call as { method: string }).method === "models.list");
+    expect(catalogCalls).toHaveLength(1);
+    expect(catalogCalls[0]?.[0]).toMatchObject({ pluginId: expected });
   });
 
   it("lists realtime and transcription models live, never from a built-in list", async () => {
@@ -407,24 +475,20 @@ describe("connection", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("says to update a connection plugin that is too old to list models", async () => {
-    const auto = await startSession({ connectionPlugin: true, connectionPluginListsModels: false });
-    await expect(auto.harness.callRpc("models.list", { scope: "realtime" })).rejects.toThrow(
-      /Shopify AI plugin \(shopify-ai\) is too old.*0\.6\.0 or newer.*Or add an OpenAI API key/,
-    );
-    const pluginOnly = await startSession({
-      settings: { connection: "plugin" },
-      connectionPlugin: true,
-      connectionPluginListsModels: false,
-    });
-    await expect(pluginOnly.harness.callRpc("models.list", { scope: "realtime" })).rejects.toThrow(
-      /too old.*Or switch Connection away from plugin/,
-    );
-    const none = await startSession({ connectionPlugin: false });
-    await expect(none.harness.callRpc("models.list", { scope: "realtime" })).rejects.toThrow(
-      /Install and enable the Shopify AI plugin/,
-    );
-  });
+  const missingCatalog = `The ${CONNECTION_PLUGIN} plugin provides the voice connection but no model list. ` +
+    "Update it if a newer version lists models. Calls still work with the saved model.";
+  it.each([
+    ["auto", true, `${missingCatalog} Or add an OpenAI API key.`],
+    ["plugin", true, `${missingCatalog} Or switch Connection away from plugin.`],
+    ["auto", false, "Install and enable a model-listing plugin, or add an OpenAI API key to list voice models."],
+    ["plugin", false, "No model-listing plugin is installed or enabled. Install one or switch Connection away from plugin."],
+  ] as const)(
+    "gives generic catalog setup guidance in %s mode with connection installed: %s",
+    async (connection, connectionPlugin, message) => {
+      const { harness } = await startSession({ settings: { connection }, connectionPlugin, catalogPlugins: [] });
+      await expect(harness.callRpc("models.list", { scope: "realtime" })).rejects.toThrow(message);
+    },
+  );
 
   it("lists OpenAI models for the API key, tagging realtime and GPT-Live ones", async () => {
     vi.stubGlobal(
@@ -455,7 +519,7 @@ describe("connection", () => {
     });
   });
 
-  it("propagates groupLabel and latestModelsOnly from shopify-ai models.list", async () => {
+  it("propagates groupLabel and latestModelsOnly from the provider's models.list", async () => {
     const realtimeModels = [{ id: "gpt-realtime-2", name: "gpt-realtime-2", vendor: "openai", groupLabel: "OpenAI" }];
     const transcribeModels = [
       { id: "whisper-large-v3", name: "whisper-large-v3", vendor: "groq", groupLabel: "Groq" },
