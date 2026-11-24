@@ -110,67 +110,79 @@ export class VoiceSession {
       this.teardown = null;
       send({ type: "END" });
       ws.close();
-      await stopMic?.();
-      await this.player?.close();
+      const closePlayer = this.player?.close();
       this.player = null;
+      await stopMic?.();
+      await closePlayer;
       this.micLevel = 0;
       this.set({ phase: next, muted: false, ...(next === "off" ? { caption: "" } : {}) });
     };
     this.teardown = () => cleanup("off");
 
     ws.onmessage = async (event) => {
+      if (ended) return;
       const message = JSON.parse(String(event.data)) as ServerToBrowser;
       switch (message.type) {
         case "READY": {
-          const player = new Player(message.outputHz);
-          this.player = player;
-          player.onIdle = () => {
-            if (this.state.phase === "speaking") this.set({ phase: "listening" });
-          };
+          let unavailable = "Audio playback unavailable";
           try {
+            const player = new Player(message.outputHz);
+            this.player = player;
             let loudChunks = 0;
+            const bargeIn = () => {
+              // interrupt() reports idle synchronously; suppress new audio first.
+              bargeInActive = true;
+              player.interrupt();
+            };
+            player.onActive = () => {
+              if (ended) return;
+              // Speech may have started while output was still buffering.
+              if (bargeInActive || loudChunks >= BARGE_IN_CHUNKS) bargeIn();
+              else if (this.state.phase === "listening") this.set({ phase: "speaking" });
+            };
+            player.onIdle = () => {
+              if (!ended && this.state.phase === "speaking") this.set({ phase: "listening" });
+            };
+            await player.ready;
+            if (ended) break;
+
+            unavailable = "Microphone unavailable";
             stopMic = await startMic(message.inputHz, () => this.state.muted, (base64Data, rms) => {
+              if (ended) return;
               send({ type: "AUDIO", base64Data });
               this.micLevel = rms;
-                if (rms > BARGE_IN_RMS) {
-                  loudChunks += 1;
-                  quietChunks = 0;
-              if (loudChunks >= BARGE_IN_CHUNKS && player.playing) {
-                player.interrupt();
-                    bargeInActive = true;
-                this.set({ phase: "listening" });
-              }
-                } else {
-                  loudChunks = 0;
-                  if (bargeInActive) {
-                    quietChunks += 1;
-                    if (quietChunks >= BARGE_IN_QUIET_CHUNKS) bargeInActive = false;
-                  }
+              if (rms > BARGE_IN_RMS) {
+                loudChunks += 1;
+                quietChunks = 0;
+                if (loudChunks >= BARGE_IN_CHUNKS && player.playing) bargeIn();
+              } else {
+                loudChunks = 0;
+                if (bargeInActive && ++quietChunks >= BARGE_IN_QUIET_CHUNKS) {
+                  bargeInActive = false;
                 }
-              },
-            );
+              }
+            });
             // The user may have ended the session while the permission prompt was open.
             if (ended) {
               await stopMic();
               break;
             }
-            this.set({ phase: "listening" });
+            this.set({ phase: player.playing ? "speaking" : "listening" });
           } catch (error) {
-            this.set({ caption: `Microphone unavailable: ${error instanceof Error ? error.message : String(error)}` });
+            if (ended) break;
+            this.set({ caption: `${unavailable}: ${error instanceof Error ? error.message : String(error)}` });
             await cleanup("error");
           }
           break;
         }
         case "AUDIO":
           if (bargeInActive) break;
-          this.player?.enqueue(message.base64Data);
-          if (this.state.phase !== "speaking") this.set({ phase: "speaking" });
+          this.player?.enqueue(message.base64Data, message.pts);
           break;
         case "INTERRUPTION":
           bargeInActive = false;
           quietChunks = 0;
           this.player?.interrupt();
-          this.set({ phase: "listening" });
           break;
         case "TRANSCRIPT":
           if (message.role === "assistant") {
