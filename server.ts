@@ -101,7 +101,7 @@ const ProviderModelsOutput = z.object({
 /** Messages the backend sends to the browser. */
 export type ServerToBrowser =
   | { type: "READY"; inputHz: number; outputHz: number }
-  | { type: "AUDIO"; base64Data: string }
+  | { type: "AUDIO"; base64Data: string; pts?: number }
   | { type: "INTERRUPTION" }
   | { type: "TRANSCRIPT"; role: "user" | "assistant"; text: string }
   | { type: "TOOL"; name: string; detail: string }
