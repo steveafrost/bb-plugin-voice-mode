@@ -91,9 +91,9 @@ const MAX_FOLLOW_UP_REFUSALS = 2;
 export const VOICES = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"] as const;
 export const CONNECTIONS = ["auto", "plugin", "openai-api-key"] as const;
 
-const ShopifyAiModelsOutput = z.object({
-  scope: z.string(),
-  fetchedAt: z.number(),
+const ProviderModelsOutput = z.object({
+  scope: z.string().optional(),
+  fetchedAt: z.number().optional(),
   latestModelsOnly: z.boolean().optional(),
   models: z.array(VoiceModelOptionSchema),
 });
@@ -126,6 +126,12 @@ const RealtimeConnection = z
 });
 type RealtimeConnection = z.infer<typeof RealtimeConnection>;
 type DelegationChoice = { model: string; reasoningEffort?: string };
+
+function isConnectionInputError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if ("code" in error) return error.code === "invalid_input";
+  return /\b(?:unrecognized|unknown|unexpected) keys?\b[^\n]*\bmodel\b/i.test(error.message);
+}
 
 const SEND_VERBATIM = {
   type: "function",
@@ -362,10 +368,13 @@ export default async function plugin(bb: BbPluginApi) {
     return withDefaultModels(next);
   }
 
+  async function discoverConnectionProvider() {
+    const methods = await bb.sdk.plugins.experimental_discoverRpc({ method: CONNECTION_RPC });
+    return methods.find((entry) => entry.method === CONNECTION_RPC && entry.pluginId !== PLUGIN_ID);
+  }
+
   const outdatedModelListMessage = (pluginId: string) =>
-    pluginId === "shopify-ai"
-      ? "The installed Shopify AI plugin (shopify-ai) is too old to list voice models. Update it to 0.6.0 or newer. Calls still work with the saved model."
-      : `The ${pluginId} plugin provides the voice connection but no model list. Update it if a newer version lists models. Calls still work with the saved model.`;
+    `The ${pluginId} plugin provides the voice connection but no model list. Update it if a newer version lists models. Calls still work with the saved model.`;
 
   async function listLiveModels(
     scope: "realtime" | "transcription" | "delegation",
@@ -377,10 +386,12 @@ export default async function plugin(bb: BbPluginApi) {
     let outdatedProvider: string | null = null;
 
     if (mode !== "openai-api-key") {
-      const methods = await bb.sdk.plugins.experimental_discoverRpc({ method: "models.list" });
-      const provider =
-        methods.find((entry) => entry.pluginId === "shopify-ai" && entry.method === "models.list") ??
-        methods.find((entry) => entry.method === "models.list" && entry.pluginId !== PLUGIN_ID);
+      const [connProvider, methods] = await Promise.all([
+        discoverConnectionProvider(),
+        bb.sdk.plugins.experimental_discoverRpc({ method: "models.list" }),
+      ]);
+      const catalogs = methods.filter((entry) => entry.method === "models.list" && entry.pluginId !== PLUGIN_ID);
+      const provider = catalogs.find((entry) => entry.pluginId === connProvider?.pluginId) ?? catalogs[0];
       if (provider) {
         const res = await bb.sdk.plugins.callRpc({
           pluginId: provider.pluginId,
@@ -390,7 +401,7 @@ export default async function plugin(bb: BbPluginApi) {
             ...(scope !== "realtime" ? { vendor: "openai" } : {}),
             ...(refresh ? { refresh: true } : {}),
           },
-          outputSchema: ShopifyAiModelsOutput,
+          outputSchema: ProviderModelsOutput,
         });
         return {
           models:
@@ -404,16 +415,12 @@ export default async function plugin(bb: BbPluginApi) {
           ...(res.latestModelsOnly !== undefined ? { latestModelsOnly: res.latestModelsOnly } : {}),
         };
       }
-      // A connection plugin without `models.list` (shopify-ai before 0.6.0) can
-      // still place calls, so say it needs updating instead of installing.
-      const connections = await bb.sdk.plugins.experimental_discoverRpc({ method: CONNECTION_RPC });
-      const stale = connections.find((entry) => entry.method === CONNECTION_RPC && entry.pluginId !== PLUGIN_ID);
-      if (stale) outdatedProvider = stale.pluginId;
+      outdatedProvider = connProvider?.pluginId ?? null;
       if (mode === "plugin") {
         throw new Error(
           outdatedProvider
             ? `${outdatedModelListMessage(outdatedProvider)} Or switch Connection away from plugin.`
-            : "No model-listing plugin (such as shopify-ai) is installed or enabled. Install one or switch Connection away from plugin.",
+            : "No model-listing plugin is installed or enabled. Install one or switch Connection away from plugin.",
         );
       }
     }
@@ -425,7 +432,7 @@ export default async function plugin(bb: BbPluginApi) {
           ? "Add an OpenAI API key in Voice Mode settings to list voice models."
           : outdatedProvider
             ? `${outdatedModelListMessage(outdatedProvider)} Or add an OpenAI API key.`
-            : "Install and enable the Shopify AI plugin (shopify-ai), or add an OpenAI API key to list voice models.",
+            : "Install and enable a model-listing plugin, or add an OpenAI API key to list voice models.",
       );
     }
     const response = await fetch(OPENAI_MODELS_URL, {
@@ -472,18 +479,24 @@ export default async function plugin(bb: BbPluginApi) {
     refresh: boolean,
     realtimeModel: string,
   ): Promise<(RealtimeConnection & { pluginId: string }) | null> {
-    const methods = await bb.sdk.plugins.experimental_discoverRpc({ method: CONNECTION_RPC });
-    const provider = methods.find((m) => m.method === CONNECTION_RPC && m.pluginId !== PLUGIN_ID);
+    const provider = await discoverConnectionProvider();
     if (!provider) return null;
-    const input: { refresh?: boolean; model?: string } = {};
-    if (refresh) input.refresh = true;
-    if (provider.pluginId === "shopify-ai" && realtimeModel) input.model = realtimeModel;
-    const result = await bb.sdk.plugins.callRpc({
+    const args = {
       pluginId: provider.pluginId,
       method: CONNECTION_RPC,
-      input,
       outputSchema: RealtimeConnection,
-    });
+    };
+    const input: { refresh?: boolean } = refresh ? { refresh: true } : {};
+    let result: RealtimeConnection;
+    try {
+      result = await bb.sdk.plugins.callRpc({ ...args, input: realtimeModel ? { ...input, model: realtimeModel } : input });
+    } catch (error) {
+      if (!realtimeModel || !isConnectionInputError(error)) throw error;
+      bb.log.debug(
+        `voice session: ${provider.pluginId} rejected the connection input with a model override; retrying without it`,
+      );
+      result = await bb.sdk.plugins.callRpc({ ...args, input });
+    }
     return { ...RealtimeConnection.parse(result), pluginId: provider.pluginId };
   }
 
