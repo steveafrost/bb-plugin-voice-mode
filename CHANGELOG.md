@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5
+
+- Buffer assistant PCM playback through an `AudioWorklet` jitter buffer (with a `ScriptProcessorNode` fallback) so uneven packet delivery plays smoothly without losing barge-in or GPT-Live silent-frame filtering. Thanks to Ainur Minibaev (#12).
+- Remove vendor-specific provider routing and settings labels: Voice Mode now prefers the active `realtimeConnection` plugin's `models.list` catalog (falling back to any other catalog plugin), retries once without a `model` override if a strict provider rejects it, and uses provider-neutral copy (#11).
+- Update `@get-bb/plugin-sdk` to `0.6.157` (matching bb 0.50.1) and `hono` to `^4.13.16` while keeping `engines.bbPluginSdk` at `>=0.6.132` (#13).
+
 ## 0.3.4
 
 - Pin the connection plugin install commands in settings and the README to exact tags (Realtime Gateway `v0.1.1`, `codex-realtime/v0.1.0`). bb treats a tag as pinned, so `bb plugin update` no longer follows new releases of those repositories.
